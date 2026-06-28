@@ -1,28 +1,22 @@
 import re
 import asyncio
-import json
-import os
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from telegram import Update, ChatPermissions
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes, ChatMemberHandler
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 BOT_TOKEN = "8422286281:AAFDqQ1xhPem2Bpc4D_b0I6aRF7zH0C1dFo"
 OWNER_ID = 5742325054  # замени на свой Telegram ID
 bot_enabled = True
 
-# ── Статистика ────────────────────────────────────────────────────────────────
+# Статистика
 stats = defaultdict(lambda: {"violations": 0, "name": ""})
 total_violations = 0
 
-# ── Антифлуд ──────────────────────────────────────────────────────────────────
-user_messages = defaultdict(list)   # {user_id: [timestamps]}
-user_last_msg = defaultdict(str)    # {user_id: last_message}
-user_repeat = defaultdict(int)      # {user_id: repeat_count}
-
-# ── Предупреждения ────────────────────────────────────────────────────────────
-warnings = defaultdict(int)         # {user_id: count}
-WARN_LIMIT = 3
+# Антифлуд
+user_messages = defaultdict(list)
+user_last_msg = defaultdict(str)
+user_repeat = defaultdict(int)
 
 INSULT_PATTERNS = [
     r"\bдаун\b", r"\bдауна\b", r"\bдауны\b", r"д[аa][уy]н",
@@ -50,7 +44,7 @@ INSULT_PATTERNS = [
     r"\bпридурок\b", r"\bпридурка\b", r"\bлох\b", r"\bлоха\b",
     r"\bгандон\b", r"\bгандона\b", r"\bгандоны\b",
     r"\bхуесос\b", r"\bхуесоска\b",
-    r"\bпидарас\b", r"\bпидараса\b", r"\bпидор\b", r"\bпидора\b",
+    r"\bпидарас\b", r"\bпидораса\b", r"\bпидор\b", r"\bпидора\b",
     r"\bпидоры\b", r"\bпидорас\b",
     r"\bуебан\b", r"\bуебана\b", r"\bуебаны\b", r"\bуёбан\b",
     r"\bчмо\b", r"\bчмошник\b", r"\bчмошница\b",
@@ -93,7 +87,7 @@ INSULT_PATTERNS = [
     r"м[аa][тt][ьъ]\s*[тt][вv][оo][юy]\s*[её][бb][аa][нн][аa][яy]",
     r"[тt][вv][оo][юy]\s*м[аa][тt][ьъ]\s*[её][бb][аa][нн][аa][яy]",
     r"[тt][вv][оo][юy]\s*[Mm][аa][тt][ьъ]\s*[хx][уy][иiй][нн][яy]",
-    r"[её][бb][аa][тт][ьъ]\s*(твою?|его|её|вашу?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда|отчима)",
+    r"[её]б[аa][тт][ьъ]\s*(твою?|его|её|вашу?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда|отчима)",
     r"[её][бb][уy]\s*(твою?|его|её|вашу?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда|отчима)",
     r"[яy]\s*(твоего?|твою|вашего?|вашу)\s*(отчима|мать|маму|батю|отца|сестру|брата|бабушку|деда|папу|мачеху)\s*[её][бb][аa][лл]",
     r"(иди|ади|вали|пошёл|пошел)\s*[чч][мm][оo]",
@@ -109,7 +103,6 @@ def contains_insult(text):
             return True
     return False
 
-# ── Снятие мута ───────────────────────────────────────────────────────────────
 async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
     await asyncio.sleep(15)
     try:
@@ -136,7 +129,6 @@ async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
     except Exception as e:
         print(f"[ОШИБКА] Сообщение о снятии мута: {e}")
 
-# ── Выдача мута ───────────────────────────────────────────────────────────────
 async def do_mute(context, chat_id, user_id, mention, reason="оскорбление"):
     global total_violations
     mute_until = datetime.now(timezone.utc) + timedelta(seconds=20)
@@ -151,10 +143,8 @@ async def do_mute(context, chat_id, user_id, mention, reason="оскорблен
         )
     except Exception as e:
         print(f"[ОШИБКА] Мут: {e}")
-
     total_violations += 1
     stats[user_id]["violations"] += 1
-
     try:
         mute_msg = await context.bot.send_message(
             chat_id=chat_id,
@@ -169,7 +159,6 @@ async def do_mute(context, chat_id, user_id, mention, reason="оскорблен
     except Exception as e:
         print(f"[ОШИБКА] Сообщение о муте: {e}")
 
-# ── Приветствие новых участников ──────────────────────────────────────────────
 async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for member in update.message.new_chat_members:
         mention = f'<a href="tg://user?id={member.id}">{member.first_name}</a>'
@@ -179,7 +168,6 @@ async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
 
-# ── Основной обработчик сообщений ─────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_enabled:
         return
@@ -197,7 +185,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats[user.id]["name"] = user.first_name
     mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
 
-    # Антифлуд — больше 5 сообщений за 5 секунд
+    # Антифлуд
     user_messages[user.id] = [t for t in user_messages[user.id] if (now - t).seconds < 5]
     user_messages[user.id].append(now)
     if len(user_messages[user.id]) > 5:
@@ -208,7 +196,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await do_mute(context, chat_id, user.id, mention, "флуд")
         return
 
-    # Антиспам — одно и то же сообщение 3 раза подряд
+    # Антиспам
     if text == user_last_msg[user.id]:
         user_repeat[user.id] += 1
         if user_repeat[user.id] >= 3:
@@ -233,28 +221,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[ОШИБКА] Удаление: {e}")
         return
 
-    # Система предупреждений
-    warnings[user.id] += 1
-    warn_count = warnings[user.id]
+    await do_mute(context, chat_id, user.id, mention, "оскорбление")
 
-    if warn_count < WARN_LIMIT:
+async def handle_flood_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not bot_enabled:
+        return
+    message = update.message
+    if not message:
+        return
+    if message.chat.type not in ("group", "supergroup"):
+        return
+
+    user = message.from_user
+    chat_id = message.chat_id
+    now = datetime.now(timezone.utc)
+
+    stats[user.id]["name"] = user.first_name
+    mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+
+    user_messages[user.id] = [t for t in user_messages[user.id] if (now - t).seconds < 5]
+    user_messages[user.id].append(now)
+    if len(user_messages[user.id]) > 5:
         try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"⚠️ {mention}, предупреждение <b>{warn_count}/{WARN_LIMIT}</b> за оскорбление.\n"
-                    f"❌ Сообщение удалено.\n"
-                    f"{'🔇 На следующем нарушении получишь мут!' if warn_count == WARN_LIMIT - 1 else ''}"
-                ),
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            print(f"[ОШИБКА] Предупреждение: {e}")
-    else:
-        warnings[user.id] = 0
-        await do_mute(context, chat_id, user.id, mention, "оскорбление")
+            await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
+        except Exception:
+            pass
+        await do_mute(context, chat_id, user.id, mention, "флуд стикерами/гифками")
 
-# ── Команды ───────────────────────────────────────────────────────────────────
 async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_enabled
     if update.message.from_user.id != OWNER_ID:
@@ -322,10 +315,9 @@ async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if member.status not in ("administrator", "creator"):
         return
     target = update.message.reply_to_message.from_user
-    warnings[target.id] += 1
     mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
     await update.message.reply_text(
-        f"⚠️ {mention} получил предупреждение <b>{warnings[target.id]}/{WARN_LIMIT}</b>.",
+        f"⚠️ {mention} получил предупреждение от администратора.",
         parse_mode="HTML",
     )
 
@@ -357,6 +349,8 @@ def main():
     app.add_handler(CommandHandler("top", cmd_top))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, handle_flood_only))
+    app.add_handler(MessageHandler(filters.ANIMATION, handle_flood_only))
     print("Бот запущен.")
     app.run_polling(allowed_updates=["message"])
 
