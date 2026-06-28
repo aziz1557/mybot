@@ -87,7 +87,7 @@ async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status)
 
 async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
-    await asyncio.sleep(30)
+    await asyncio.sleep(15)
     try:
         await bot.restrict_chat_member(
             chat_id=chat_id,
@@ -138,7 +138,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[ОШИБКА] Удаление: {e}")
         return
 
-    mute_until = datetime.now(timezone.utc) + timedelta(seconds=35)
+    mute_until = datetime.now(timezone.utc) + timedelta(seconds=15)
     try:
         await context.bot.restrict_chat_member(
             chat_id=chat_id,
@@ -160,9 +160,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mute_msg = await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"🔇 {mention} получил мут на <b>30 секунд</b> за оскорбление.\n"
+                f"🔇 {mention} получил мут на <b>15 секунд</b> за оскорбление.\n"
                 f"❌ Сообщение удалено.\n"
-                f"⏳ Писать снова можно будет через <b>30 секунд</b>."
+                f"⏳ Писать снова можно будет через <b>15 секунд</b>."
             ),
             parse_mode="HTML",
         )
