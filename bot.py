@@ -15,29 +15,25 @@ bot_enabled = True
 DATA_FILE = "bot_data.json"
 LOG_FILE = "bot_log.txt"
 
-WARN_LIMIT = 3
-
 # ── Загрузка / сохранение данных ──────────────────────────────────────────────
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"stats": {}, "warnings": {}, "total_violations": 0, "user_info": {}}
+    return {"stats": {}, "total_violations": 0, "user_info": {}}
 
 def save_data():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump({
             "stats": stats,
-            "warnings": warnings,
             "total_violations": total_violations,
             "user_info": user_info,
         }, f, ensure_ascii=False, indent=2)
 
 _data = load_data()
 stats         = _data.get("stats", {})
-warnings      = _data.get("warnings", {})
 total_violations = _data.get("total_violations", 0)
-user_info     = _data.get("user_info", {})   # {uid: {"name": "", "joined": "", "violations": 0}}
+user_info     = _data.get("user_info", {})
 
 # Антиспам (в памяти — не критично)
 user_last_msg = defaultdict(str)
@@ -293,38 +289,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[ОШИБКА] Удаление: {e}")
         return
 
-    # Система предупреждений
-    warnings[uid] = warnings.get(uid, 0) + 1
-    warn_count = warnings[uid]
-    save_data()
-
-    log("ОСКОРБЛЕНИЕ", f"user={user.first_name} ({uid}) | warn={warn_count}/{WARN_LIMIT} | текст={text[:80]}")
-    await send_owner_log(
-        context.bot,
-        f"⚠️ <b>ОСКОРБЛЕНИЕ</b>\n"
-        f"👤 {mention} (ID: <code>{user.id}</code>)\n"
-        f"📊 Предупреждение: <b>{warn_count}/{WARN_LIMIT}</b>\n"
-        f"💬 Сообщение: <i>{text[:200]}</i>\n"
-        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-
-    if warn_count < WARN_LIMIT:
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"⚠️ {mention}, предупреждение <b>{warn_count}/{WARN_LIMIT}</b> за оскорбление.\n"
-                    f"❌ Сообщение удалено.\n"
-                    f"{'🔇 На следующем нарушении получишь мут!' if warn_count == WARN_LIMIT - 1 else ''}"
-                ),
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            print(f"[ОШИБКА] Предупреждение: {e}")
-    else:
-        warnings[uid] = 0
-        save_data()
-        await do_mute(context, chat_id, user.id, mention, "оскорбление", text)
+    log("ОСКОРБЛЕНИЕ", f"user={user.first_name} ({uid}) | текст={text[:80]}")
+    await do_mute(context, chat_id, user.id, mention, "оскорбление", text)
 
 # ── Команды модерации ─────────────────────────────────────────────────────────
 async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -414,23 +380,6 @@ async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(f"👢 {target.first_name} кикнут.")
 
-async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы выдать предупреждение.")
-        return
-    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
-    if member.status not in ("administrator", "creator"):
-        return
-    target = update.message.reply_to_message.from_user
-    uid = str(target.id)
-    warnings[uid] = warnings.get(uid, 0) + 1
-    save_data()
-    mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
-    log("ВАРН (АДМИН)", f"admin={update.message.from_user.first_name} | target={target.first_name} | warn={warnings[uid]}/{WARN_LIMIT}")
-    await update.message.reply_text(
-        f"⚠️ {mention} получил предупреждение <b>{warnings[uid]}/{WARN_LIMIT}</b>.",
-        parse_mode="HTML",
-    )
 
 # ── Мут на время: /mute_time 10m / 1h / 1d ───────────────────────────────────
 async def cmd_mute_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -501,7 +450,6 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.message.reply_to_message.from_user if update.message.reply_to_message else update.message.from_user
     uid = str(target.id)
     info = user_info.get(uid, {})
-    warn_count = warnings.get(uid, 0)
     viol = stats.get(uid, {}).get("violations", 0)
     joined = info.get("joined", "неизвестно")
     username = f"@{info.get('username')}" if info.get("username") else "нет"
@@ -511,7 +459,6 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔹 Username: {username}\n"
         f"🔹 ID: <code>{target.id}</code>\n"
         f"🔹 Вступил: {joined}\n"
-        f"🔹 Предупреждений: <b>{warn_count}/{WARN_LIMIT}</b>\n"
         f"🔹 Мутов/нарушений: <b>{viol}</b>",
         parse_mode="HTML",
     )
@@ -531,7 +478,7 @@ async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❌ Оскорбления участников — запрещены\n"
         "❌ Спам и флуд — запрещены\n"
         "❌ Реклама без разрешения — запрещена\n\n"
-        "⚠️ За нарушения: предупреждение → мут → бан\n"
+        "⚠️ За нарушения: мут → бан\n"
         "👮 Решение админов — окончательное.",
         parse_mode="HTML",
     )
@@ -578,7 +525,7 @@ def main():
     app.add_handler(CommandHandler("unmute", cmd_unmute))
     app.add_handler(CommandHandler("ban", cmd_ban))
     app.add_handler(CommandHandler("kick", cmd_kick))
-    app.add_handler(CommandHandler("warn", cmd_warn))
+
 
     # Статистика
     app.add_handler(CommandHandler("stats", cmd_stats))
