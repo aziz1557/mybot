@@ -544,6 +544,97 @@ ANEKDOTS = [
 async def cmd_anekdot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"😂 <b>Анекдот:</b>\n\n{random.choice(ANEKDOTS)}", parse_mode="HTML")
 
+async def cmd_8ball(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    answers = [
+        "🟢 Однозначно да!", "🟢 Без сомнений!", "🟢 Скорее всего да.",
+        "🟢 Всё указывает на это.", "🟢 Можешь рассчитывать на это.",
+        "🟡 Не уверен, попробуй позже.", "🟡 Спроси снова.", "🟡 Лучше не говорить сейчас.",
+        "🟡 Сложно сказать.", "🟡 Сосредоточься и спроси снова.",
+        "🔴 Не рассчитывай на это.", "🔴 Мой ответ — нет.", "🔴 Всё указывает на нет.",
+        "🔴 Очень сомнительно.", "🔴 Перспективы не очень.",
+    ]
+    question = " ".join(context.args) if context.args else ""
+    if not question:
+        await update.message.reply_text("🎱 Задай вопрос: <b>/8ball твой вопрос</b>", parse_mode="HTML")
+        return
+    await update.message.reply_text(
+        f"🎱 <b>Вопрос:</b> {question}\n\n<b>Ответ:</b> {random.choice(answers)}",
+        parse_mode="HTML",
+    )
+
+async def cmd_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = update.message.reply_to_message.from_user if update.message.reply_to_message else update.message.from_user
+    score = random.randint(1, 10)
+    bars = "█" * score + "░" * (10 - score)
+    emoji = "🌟" if score >= 8 else "😐" if score >= 5 else "💀"
+    await update.message.reply_text(
+        f"{emoji} <b>Оценка для {target.first_name}:</b>\n\n"
+        f"[{bars}] <b>{score}/10</b>",
+        parse_mode="HTML",
+    )
+
+async def cmd_casino(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    slots = ["🍒", "🍋", "🍊", "🍇", "⭐", "💎", "7️⃣"]
+    result = [random.choice(slots) for _ in range(3)]
+    line = " | ".join(result)
+    if result[0] == result[1] == result[2]:
+        verdict = "🎉 <b>ДЖЕКПОТ! Три одинаковых!</b>"
+    elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
+        verdict = "✨ <b>Два одинаковых — почти!</b>"
+    else:
+        verdict = "😢 <b>Не повезло, попробуй снова!</b>"
+    await update.message.reply_text(
+        f"🎰 <b>Казино</b>\n\n[ {line} ]\n\n{verdict}",
+        parse_mode="HTML",
+    )
+
+async def cmd_chatinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.message.chat
+    try:
+        count = await context.bot.get_chat_member_count(chat.id)
+    except Exception:
+        count = "?"
+    chat_type = {"group": "Группа", "supergroup": "Супергруппа", "channel": "Канал"}.get(chat.type, chat.type)
+    username = f"@{chat.username}" if chat.username else "нет"
+    await update.message.reply_text(
+        f"💬 <b>Информация о чате</b>\n\n"
+        f"🔹 Название: {chat.title}\n"
+        f"🔹 Тип: {chat_type}\n"
+        f"🔹 ID: <code>{chat.id}</code>\n"
+        f"🔹 Username: {username}\n"
+        f"🔹 Участников: <b>{count}</b>",
+        parse_mode="HTML",
+    )
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 <b>Список всех команд:</b>\n\n"
+        "👮 <b>Модерация (только админы):</b>\n"
+        "/mute — замутить пользователя (15 сек)\n"
+        "/mute_time 10m|1h|1d — мут на время\n"
+        "/unmute — размутить пользователя\n"
+        "/ban — забанить пользователя\n"
+        "/kick — кикнуть пользователя\n"
+        "/bot — включить/выключить модерацию\n\n"
+        "📊 <b>Статистика:</b>\n"
+        "/stats — всего нарушений\n"
+        "/top — топ нарушителей\n"
+        "/logs — последние события (владелец)\n\n"
+        "ℹ️ <b>Информация:</b>\n"
+        "/info — инфо о пользователе\n"
+        "/id — твой Telegram ID\n"
+        "/chatinfo — инфо о группе\n"
+        "/rules — правила группы\n\n"
+        "🎮 <b>Активности:</b>\n"
+        "/roll — бросить кубик 🎲\n"
+        "/flip — орёл или решка 🪙\n"
+        "/8ball вопрос — шар предсказаний 🎱\n"
+        "/rate — оценить пользователя ⭐\n"
+        "/casino — однорукий бандит 🎰\n"
+        "/anekdot — случайный анекдот 😂",
+        parse_mode="HTML",
+    )
+
 # ── Просмотр логов (только владелец) ─────────────────────────────────────────
 async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
@@ -553,7 +644,7 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     with open(LOG_FILE, "r", encoding="utf-8") as f:
         lines = f.readlines()
-    last = "".join(lines[-30:])  # последние 30 строк
+    last = "".join(lines[-30:])
     await update.message.reply_text(f"📋 <b>Последние события:</b>\n\n<pre>{last}</pre>", parse_mode="HTML")
 
 def main():
@@ -567,7 +658,6 @@ def main():
     app.add_handler(CommandHandler("ban", cmd_ban))
     app.add_handler(CommandHandler("kick", cmd_kick))
 
-
     # Статистика
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("top", cmd_top))
@@ -576,11 +666,16 @@ def main():
     # Информация
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("chatinfo", cmd_chatinfo))
     app.add_handler(CommandHandler("rules", cmd_rules))
+    app.add_handler(CommandHandler("help", cmd_help))
 
     # Активности
     app.add_handler(CommandHandler("roll", cmd_roll))
     app.add_handler(CommandHandler("flip", cmd_flip))
+    app.add_handler(CommandHandler("8ball", cmd_8ball))
+    app.add_handler(CommandHandler("rate", cmd_rate))
+    app.add_handler(CommandHandler("casino", cmd_casino))
     app.add_handler(CommandHandler("anekdot", cmd_anekdot))
 
     # Сообщения
