@@ -2,23 +2,27 @@ import re
 import asyncio
 import json
 import os
+import random
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from telegram import Update, ChatPermissions
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes, ChatMemberHandler
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 BOT_TOKEN = "8422286281:AAFDqQ1xhPem2Bpc4D_b0I6aRF7zH0C1dFo"
 OWNER_ID = 5742325054
 bot_enabled = True
 
 DATA_FILE = "bot_data.json"
+LOG_FILE = "bot_log.txt"
+
+WARN_LIMIT = 3
 
 # ── Загрузка / сохранение данных ──────────────────────────────────────────────
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"stats": {}, "warnings": {}, "total_violations": 0}
+    return {"stats": {}, "warnings": {}, "total_violations": 0, "user_info": {}}
 
 def save_data():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -26,16 +30,34 @@ def save_data():
             "stats": stats,
             "warnings": warnings,
             "total_violations": total_violations,
+            "user_info": user_info,
         }, f, ensure_ascii=False, indent=2)
 
 _data = load_data()
-stats = _data.get("stats", {})                  # {str(user_id): {"violations": N, "name": "..."}}
-warnings = _data.get("warnings", {})            # {str(user_id): count}
+stats         = _data.get("stats", {})
+warnings      = _data.get("warnings", {})
 total_violations = _data.get("total_violations", 0)
+user_info     = _data.get("user_info", {})   # {uid: {"name": "", "joined": "", "violations": 0}}
 
-# ── Антиспам (повторные сообщения) ────────────────────────────────────────────
+# Антиспам (в памяти — не критично)
 user_last_msg = defaultdict(str)
-user_repeat = defaultdict(int)
+user_repeat   = defaultdict(int)
+
+# ── Логирование ───────────────────────────────────────────────────────────────
+def log(action: str, details: str = ""):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {action}"
+    if details:
+        line += f" | {details}"
+    print(line)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+async def send_owner_log(bot, text: str):
+    try:
+        await bot.send_message(chat_id=OWNER_ID, text=text, parse_mode="HTML")
+    except Exception as e:
+        print(f"[ОШИБКА] Лог владельцу: {e}")
 
 # ── Паттерны оскорблений ──────────────────────────────────────────────────────
 INSULT_PATTERNS = [
@@ -85,18 +107,13 @@ INSULT_PATTERNS = [
     r"н[аa]х[уy][иi]", r"[пp][иi1][зz3][дd][аa]",
     r"\bпизда\b", r"\bпизды\b", r"\bпизде\b", r"\bпизду\b",
     r"п[иi1]зд[аaеeуy]", r"п[иi1][зz3]д",
-    r"[хx][уy][иiй]\s*[тt][её][бb][её]",
-    r"[хx][уy][иiй]\s*[тt][её][бb][яa]",
-    r"[хx][уy][иiй]\s*[тt][яy]",
-    r"[хx][уy][иiй]\s*[вv][аa][мm]",
+    r"[хx][уy][иiй]\s*[тt][её][бb][её]", r"[хx][уy][иiй]\s*[тt][её][бb][яa]",
+    r"[хx][уy][иiй]\s*[тt][яy]", r"[хx][уy][иiй]\s*[вv][аa][мm]",
     r"[хx][уy][иiй]\s*[тt][её][бb][её]\s*в\s*р[оo][тt]",
-    r"[хx][уy][иiй]\s*в\s*р[оo][тt]",
-    r"в\s*р[оo][тt]\s*[тt][её][бb][её]",
+    r"[хx][уy][иiй]\s*в\s*р[оo][тt]", r"в\s*р[оo][тt]\s*[тt][её][бb][её]",
     r"в\s*р[оo][тt]\s*[её][бb][уy]",
-    r"[тt][её][бb][яa]\s*[её][бb][аa][лл]",
-    r"[тt][её][бb][яa]\s*[эe][бb][аa][лл]",
-    r"[тt][её][бb][яa]\s*[её][бb][уy]",
-    r"[тt][её][бb][яa]\s*[её][бb][аa][тт][ьъ]",
+    r"[тt][её][бb][яa]\s*[её][бb][аa][лл]", r"[тt][её][бb][яa]\s*[эe][бb][аa][лл]",
+    r"[тt][её][бb][яa]\s*[её][бb][уy]", r"[тt][её][бb][яa]\s*[её][бb][аa][тт][ьъ]",
     r"[тt][её][бb][яa]\s*[её][бb][аa][тт]",
     r"[яy]\s*[тt][её][бb][яa]\s*[её][бb][аa][лл]",
     r"[яy]\s*[тt][её][бb][яa]\s*[эe][бb][аa][лл]",
@@ -112,10 +129,7 @@ INSULT_PATTERNS = [
     r"[яy]\s*(твоего?|твою|вашего?|вашу)\s*(отчима|мать|маму|батю|отца|сестру|брата|бабушку|деда|папу|мачеху)\s*[её][бb][аa][лл]",
     r"(иди|ади|вали|пошёл|пошел)\s*[чч][мm][оo]",
 ]
-
-COMPILED_PATTERNS = [
-    re.compile(p, re.IGNORECASE | re.UNICODE) for p in INSULT_PATTERNS
-]
+COMPILED_PATTERNS = [re.compile(p, re.IGNORECASE | re.UNICODE) for p in INSULT_PATTERNS]
 
 def contains_insult(text):
     for pattern in COMPILED_PATTERNS:
@@ -151,7 +165,7 @@ async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
         print(f"[ОШИБКА] Сообщение о снятии мута: {e}")
 
 # ── Выдача мута ───────────────────────────────────────────────────────────────
-async def do_mute(context, chat_id, user_id, mention, reason="оскорбление"):
+async def do_mute(context, chat_id, user_id, mention, reason="оскорбление", deleted_text=""):
     global total_violations
     mute_until = datetime.now(timezone.utc) + timedelta(seconds=20)
     try:
@@ -171,7 +185,20 @@ async def do_mute(context, chat_id, user_id, mention, reason="оскорблен
     if uid not in stats:
         stats[uid] = {"violations": 0, "name": ""}
     stats[uid]["violations"] += 1
+    if uid in user_info:
+        user_info[uid]["violations"] = user_info[uid].get("violations", 0) + 1
     save_data()
+
+    name = stats[uid].get("name", uid)
+    log("МУТ", f"user={name} ({uid}) | причина={reason} | сообщение={deleted_text[:80]}")
+    await send_owner_log(
+        context.bot,
+        f"🔇 <b>МУТ</b>\n"
+        f"👤 {mention} (ID: <code>{user_id}</code>)\n"
+        f"📌 Причина: {reason}\n"
+        + (f"💬 Сообщение: <i>{deleted_text[:200]}</i>\n" if deleted_text else "")
+        + f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
 
     try:
         mute_msg = await context.bot.send_message(
@@ -190,10 +217,21 @@ async def do_mute(context, chat_id, user_id, mention, reason="оскорблен
 # ── Приветствие новых участников ──────────────────────────────────────────────
 async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for member in update.message.new_chat_members:
+        uid = str(member.id)
+        if uid not in user_info:
+            user_info[uid] = {
+                "name": member.first_name,
+                "username": member.username or "",
+                "joined": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "violations": 0,
+            }
+            save_data()
+        log("ВСТУПЛЕНИЕ", f"user={member.first_name} ({uid})")
         mention = f'<a href="tg://user?id={member.id}">{member.first_name}</a>'
         await update.message.reply_text(
             f"👋 Привет, {mention}! Добро пожаловать в группу!\n"
-            f"📋 Маты разрешены, оскорбления — нет.",
+            f"📋 Маты разрешены, оскорбления — нет.\n"
+            f"📌 Напиши /rules чтобы узнать правила.",
             parse_mode="HTML",
         )
 
@@ -210,11 +248,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = message.from_user
     chat_id = message.chat_id
     text = message.text
-
     uid = str(user.id)
+
+    # Обновляем инфо о пользователе
+    if uid not in user_info:
+        user_info[uid] = {
+            "name": user.first_name,
+            "username": user.username or "",
+            "joined": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "violations": 0,
+        }
+        save_data()
+
     if uid not in stats:
-        stats[uid] = {"violations": 0, "name": ""}
+        stats[uid] = {"violations": 0, "name": user.first_name}
     stats[uid]["name"] = user.first_name
+    user_info[uid]["name"] = user.first_name
+
     mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
 
     # Антиспам — одно и то же сообщение 3 раза подряд
@@ -226,7 +276,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
             except Exception:
                 pass
-            await do_mute(context, chat_id, user.id, mention, "спам")
+            log("СПАМ", f"user={user.first_name} ({uid}) | текст={text[:60]}")
+            await do_mute(context, chat_id, user.id, mention, "спам", text)
             return
     else:
         user_repeat[user.id] = 0
@@ -247,6 +298,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     warn_count = warnings[uid]
     save_data()
 
+    log("ОСКОРБЛЕНИЕ", f"user={user.first_name} ({uid}) | warn={warn_count}/{WARN_LIMIT} | текст={text[:80]}")
+    await send_owner_log(
+        context.bot,
+        f"⚠️ <b>ОСКОРБЛЕНИЕ</b>\n"
+        f"👤 {mention} (ID: <code>{user.id}</code>)\n"
+        f"📊 Предупреждение: <b>{warn_count}/{WARN_LIMIT}</b>\n"
+        f"💬 Сообщение: <i>{text[:200]}</i>\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
     if warn_count < WARN_LIMIT:
         try:
             await context.bot.send_message(
@@ -263,15 +324,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         warnings[uid] = 0
         save_data()
-        await do_mute(context, chat_id, user.id, mention, "оскорбление")
+        await do_mute(context, chat_id, user.id, mention, "оскорбление", text)
 
-# ── Команды ───────────────────────────────────────────────────────────────────
+# ── Команды модерации ─────────────────────────────────────────────────────────
 async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_enabled
     if update.message.from_user.id != OWNER_ID:
         return
     bot_enabled = not bot_enabled
     status = "✅ Бот включён — модерация активна." if bot_enabled else "❌ Бот выключен — модерация остановлена."
+    log("ПЕРЕКЛЮЧЕНИЕ", f"bot_enabled={bot_enabled}")
     await update.message.reply_text(status)
 
 async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -283,6 +345,14 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     target = update.message.reply_to_message.from_user
     mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
+    log("МУТ (АДМИН)", f"admin={update.message.from_user.first_name} | target={target.first_name} ({target.id})")
+    await send_owner_log(
+        context.bot,
+        f"🔇 <b>МУТ (АДМИН)</b>\n"
+        f"👮 Админ: {update.message.from_user.first_name}\n"
+        f"👤 Цель: {mention} (ID: <code>{target.id}</code>)\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
     await do_mute(context, update.message.chat_id, target.id, mention, "решение админа")
 
 async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -300,6 +370,7 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
             can_send_other_messages=True, can_add_web_page_previews=True,
         ),
     )
+    log("РАЗМУТ (АДМИН)", f"admin={update.message.from_user.first_name} | target={target.first_name} ({target.id})")
     await update.message.reply_text(f"🔊 {target.first_name} размучен.")
 
 async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -310,7 +381,16 @@ async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if member.status not in ("administrator", "creator"):
         return
     target = update.message.reply_to_message.from_user
+    mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
     await context.bot.ban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+    log("БАН (АДМИН)", f"admin={update.message.from_user.first_name} | target={target.first_name} ({target.id})")
+    await send_owner_log(
+        context.bot,
+        f"🚫 <b>БАН</b>\n"
+        f"👮 Админ: {update.message.from_user.first_name}\n"
+        f"👤 Цель: {mention} (ID: <code>{target.id}</code>)\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
     await update.message.reply_text(f"🚫 {target.first_name} забанен.")
 
 async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -321,8 +401,17 @@ async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if member.status not in ("administrator", "creator"):
         return
     target = update.message.reply_to_message.from_user
+    mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
     await context.bot.ban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
     await context.bot.unban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+    log("КИК (АДМИН)", f"admin={update.message.from_user.first_name} | target={target.first_name} ({target.id})")
+    await send_owner_log(
+        context.bot,
+        f"👢 <b>КИК</b>\n"
+        f"👮 Админ: {update.message.from_user.first_name}\n"
+        f"👤 Цель: {mention} (ID: <code>{target.id}</code>)\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
     await update.message.reply_text(f"👢 {target.first_name} кикнут.")
 
 async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -337,11 +426,60 @@ async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     warnings[uid] = warnings.get(uid, 0) + 1
     save_data()
     mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
+    log("ВАРН (АДМИН)", f"admin={update.message.from_user.first_name} | target={target.first_name} | warn={warnings[uid]}/{WARN_LIMIT}")
     await update.message.reply_text(
         f"⚠️ {mention} получил предупреждение <b>{warnings[uid]}/{WARN_LIMIT}</b>.",
         parse_mode="HTML",
     )
 
+# ── Мут на время: /mute_time 10m / 1h / 1d ───────────────────────────────────
+async def cmd_mute_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение и укажи время: /mute_time 10m | 1h | 1d")
+        return
+    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
+    if member.status not in ("administrator", "creator"):
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("⏱ Укажи время: /mute_time 10m | 1h | 1d")
+        return
+    raw = args[0].lower()
+    if raw.endswith("m"):
+        delta = timedelta(minutes=int(raw[:-1]))
+        label = f"{raw[:-1]} минут"
+    elif raw.endswith("h"):
+        delta = timedelta(hours=int(raw[:-1]))
+        label = f"{raw[:-1]} часов"
+    elif raw.endswith("d"):
+        delta = timedelta(days=int(raw[:-1]))
+        label = f"{raw[:-1]} дней"
+    else:
+        await update.message.reply_text("❌ Формат: 10m, 1h, 2d")
+        return
+    target = update.message.reply_to_message.from_user
+    mute_until = datetime.now(timezone.utc) + delta
+    await context.bot.restrict_chat_member(
+        chat_id=update.message.chat_id, user_id=target.id,
+        permissions=ChatPermissions(can_send_messages=False),
+        until_date=mute_until,
+    )
+    mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
+    log("МУТ НА ВРЕМЯ", f"admin={update.message.from_user.first_name} | target={target.first_name} | время={label}")
+    await send_owner_log(
+        context.bot,
+        f"🔇 <b>МУТ НА ВРЕМЯ</b>\n"
+        f"👮 Админ: {update.message.from_user.first_name}\n"
+        f"👤 Цель: {mention} (ID: <code>{target.id}</code>)\n"
+        f"⏱ Время: {label}\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    await update.message.reply_text(
+        f"🔇 {mention} замучен на <b>{label}</b>.",
+        parse_mode="HTML",
+    )
+
+# ── Статистика и топ ──────────────────────────────────────────────────────────
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📊 Всего нарушений поймано ботом: <b>{total_violations}</b>",
@@ -358,18 +496,110 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{i}. {data['name']} — <b>{data['violations']}</b> нарушений\n"
     await update.message.reply_text(text, parse_mode="HTML")
 
+# ── Информация о пользователе ─────────────────────────────────────────────────
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = update.message.reply_to_message.from_user if update.message.reply_to_message else update.message.from_user
+    uid = str(target.id)
+    info = user_info.get(uid, {})
+    warn_count = warnings.get(uid, 0)
+    viol = stats.get(uid, {}).get("violations", 0)
+    joined = info.get("joined", "неизвестно")
+    username = f"@{info.get('username')}" if info.get("username") else "нет"
+    await update.message.reply_text(
+        f"👤 <b>Информация о пользователе</b>\n\n"
+        f"🔹 Имя: {target.first_name}\n"
+        f"🔹 Username: {username}\n"
+        f"🔹 ID: <code>{target.id}</code>\n"
+        f"🔹 Вступил: {joined}\n"
+        f"🔹 Предупреждений: <b>{warn_count}/{WARN_LIMIT}</b>\n"
+        f"🔹 Мутов/нарушений: <b>{viol}</b>",
+        parse_mode="HTML",
+    )
+
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    await update.message.reply_text(
+        f"🆔 Твой Telegram ID: <code>{user.id}</code>",
+        parse_mode="HTML",
+    )
+
+# ── Правила ───────────────────────────────────────────────────────────────────
+async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📋 <b>Правила группы:</b>\n\n"
+        "✅ Маты — разрешены\n"
+        "❌ Оскорбления участников — запрещены\n"
+        "❌ Спам и флуд — запрещены\n"
+        "❌ Реклама без разрешения — запрещена\n\n"
+        "⚠️ За нарушения: предупреждение → мут → бан\n"
+        "👮 Решение админов — окончательное.",
+        parse_mode="HTML",
+    )
+
+# ── Активности ────────────────────────────────────────────────────────────────
+async def cmd_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = random.randint(1, 6)
+    await update.message.reply_text(f"🎲 {update.message.from_user.first_name} бросил кубик: <b>{result}</b>", parse_mode="HTML")
+
+async def cmd_flip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = random.choice(["🦅 Орёл", "🪙 Решка"])
+    await update.message.reply_text(f"{update.message.from_user.first_name} подбросил монету: <b>{result}</b>", parse_mode="HTML")
+
+ANEKDOTS = [
+    "— Доктор, я умру?\n— Обязательно. Мы все умрём.\n— Но мне страшно!\n— Ничего, я тоже боюсь.",
+    "Программист зашёл в магазин. Жена попросила: «Купи хлеб, и если будут яйца — возьми десяток».\nОн купил десять батонов.",
+    "— Ты умеешь хранить секреты?\n— Не знаю, мне их никогда не доверяли.",
+    "Оптимист говорит: стакан наполовину полон.\nПессимист говорит: стакан наполовину пуст.\nИнженер говорит: стакан в два раза больше, чем нужно.",
+    "— Сколько тебе лет?\n— Двадцать пять.\n— Ты так хорошо выглядишь!\n— Я знаю. Я так говорю уже десять лет.",
+]
+
+async def cmd_anekdot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"😂 <b>Анекдот:</b>\n\n{random.choice(ANEKDOTS)}", parse_mode="HTML")
+
+# ── Просмотр логов (только владелец) ─────────────────────────────────────────
+async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != OWNER_ID:
+        return
+    if not os.path.exists(LOG_FILE):
+        await update.message.reply_text("📭 Лог-файл пуст.")
+        return
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    last = "".join(lines[-30:])  # последние 30 строк
+    await update.message.reply_text(f"📋 <b>Последние события:</b>\n\n<pre>{last}</pre>", parse_mode="HTML")
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Модерация
     app.add_handler(CommandHandler("bot", toggle_bot))
     app.add_handler(CommandHandler("mute", cmd_mute))
+    app.add_handler(CommandHandler("mute_time", cmd_mute_time))
     app.add_handler(CommandHandler("unmute", cmd_unmute))
     app.add_handler(CommandHandler("ban", cmd_ban))
     app.add_handler(CommandHandler("kick", cmd_kick))
     app.add_handler(CommandHandler("warn", cmd_warn))
+
+    # Статистика
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("top", cmd_top))
+    app.add_handler(CommandHandler("logs", cmd_logs))
+
+    # Информация
+    app.add_handler(CommandHandler("info", cmd_info))
+    app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("rules", cmd_rules))
+
+    # Активности
+    app.add_handler(CommandHandler("roll", cmd_roll))
+    app.add_handler(CommandHandler("flip", cmd_flip))
+    app.add_handler(CommandHandler("anekdot", cmd_anekdot))
+
+    # Сообщения
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    log("ЗАПУСК", "Бот запущен")
     print("Бот запущен.")
     app.run_polling(allowed_updates=["message"])
 
