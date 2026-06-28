@@ -5,7 +5,7 @@ from telegram import Update, ChatPermissions
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 BOT_TOKEN = "8422286281:AAFDqQ1xhPem2Bpc4D_b0I6aRF7zH0C1dFo"
-OWNER_ID = 123456789  # замени на свой Telegram ID
+OWNER_ID = 5742325054  # замени на свой Telegram ID
 bot_enabled = True
 
 INSULT_PATTERNS = [
