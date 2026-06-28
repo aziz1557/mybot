@@ -1,341 +1,102 @@
 import re
 import asyncio
+import json
+import os
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 from telegram import Update, ChatPermissions
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes, ChatMemberHandler
 
 BOT_TOKEN = "8422286281:AAFDqQ1xhPem2Bpc4D_b0I6aRF7zH0C1dFo"
-OWNER_ID = 5742325054  # замени на свой Telegram ID
+OWNER_ID = 123456789  # замени на свой Telegram ID
 bot_enabled = True
 
+# ── Статистика ────────────────────────────────────────────────────────────────
+stats = defaultdict(lambda: {"violations": 0, "name": ""})
+total_violations = 0
+
+# ── Антифлуд ──────────────────────────────────────────────────────────────────
+user_messages = defaultdict(list)   # {user_id: [timestamps]}
+user_last_msg = defaultdict(str)    # {user_id: last_message}
+user_repeat = defaultdict(int)      # {user_id: repeat_count}
+
+# ── Предупреждения ────────────────────────────────────────────────────────────
+warnings = defaultdict(int)         # {user_id: count}
+WARN_LIMIT = 3
+
 INSULT_PATTERNS = [
-    # уебан и обходы
-    r"\bуебан\b",
-    r"\bуебана\b",
-    r"\bуебаны\b",
-    r"\bуёбан\b",
-    r"[уy][её][бb][аa][нn]",
-    r"[уy][её][бb][аa][нn][кk][аa]",
-
-    # ты/вы/он/она/оно + уебан
-    r"\b(ты|вы|он|она|оно)\s*[уy][её][бb][аa][нn]",
-    r"\b(ты|вы|он|она|оно)\s*\bуебан\b",
-    r"\b(ты|вы|он|она|оно)\s*\bуёбан\b",
-
-    # уебан + родственники
-    r"[уy][её][бb][аa][нn]\s*(твоя?|его|её|ваша?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда|отчима|мачеху)",
-    r"(твоя?|его|её|ваша?)\s*(мать|мама|батя|отец|сестра|брат|бабушка|дед|отчим)\s*[уy][её][бb][аa][нn]",
-    r"(твоя?|его|её|ваша?)\s*(мать|мама|батя|отец|сестра|брат|бабушка|дед|отчим)\s*\bуебан\b",
-    # хуесос и обходы
-    r"\bхуесос\b",
-    r"\bхуесоска\b",
-    r"[хx][уy][её][сc][оo][сc]",
-    r"[хx][уy][её][сc][оo][сc][кk][аa]",
+    r"\bдаун\b", r"\bдауна\b", r"\bдауны\b", r"д[аa][уy]н",
+    r"\bэблан\b", r"\bэблана\b", r"\bеблан\b", r"\bёблан\b",
+    r"\bеблана\b", r"\bёблана\b", r"[эeеёЕЭЁ]бл[аa]н", r"[эeеёЕЭЁ]б[лl][аa4]н",
+    r"иди\s*на[хx\*х]+", r"иди\s*н[4а][хx\*х]", r"ид[и1]\s*на[хx\*х]",
+    r"пошёл?\s*на[хx\*х]", r"пош[её]л\s*на[хx\*х]", r"вали\s*на[хx\*х]",
+    r"иди\s+на\s+х[уy][иiй]", r"иди\s+на\s+[хx][уy][иiй]",
+    r"ид[и1]\s+на\s+[хx][уy][иiй]", r"иди\s*на\s*[хx][уy][иiй]",
+    r"\b(ты|вы|он|она|оно)\s*(тупой|тупая|тупые|тупо[ей])",
+    r"\b(ты|вы|он|она|оно)\s*(идиот|идиотка|дебил|дебилка|кретин|кретинка)",
+    r"\b(ты|вы|он|она|оно)\s*(урод|уродина|урода)",
+    r"\b(ты|вы|он|она|оно)\s*(лох|лоха|лошара|лохушка)",
+    r"\b(ты|вы|он|она|оно)\s*(мразь|тварь|скотина|ублюдок|ублюдка)",
+    r"\b(ты|вы|он|она|оно)\s*(придурок|придурка|даун|дауна)",
+    r"\b(ты|вы|он|она|оно)\s*(нуб|нубас|нубик)",
+    r"\b(ты|вы|он|она|оно)\s*г[аa][нn][дd][оo][нn]",
     r"\b(ты|вы|он|она|оно)\s*[хx][уy][её][сc][оo][сc]",
-    r"\b(ты|вы|он|она|оно)\s*\bхуесос\b",
-
-    # пидарас и обходы
-    r"\bпидарас\b",
-    r"\bпидараса\b",
-    r"\bпидор\b",
-    r"\bпидора\b",
-    r"\bпидоры\b",
-    r"\bпидорас\b",
-    r"п[иi1][дd][аa][рp][аa][сc]",
-    r"п[иi1][дd][оo][рp]",
-    r"[пp][иi1][дd][оo][рp]",
-    r"[пp][иi1][дd][аa][рp][аa][сc]",
-    r"п1д[оo][рp]",
-    r"п1д[аa][рp]",
-
-    # ты/вы/он/она/оно + пидарас/пидор
     r"\b(ты|вы|он|она|оно)\s*п[иi1][дd][аa][рp][аa][сc]",
     r"\b(ты|вы|он|она|оно)\s*п[иi1][дd][оo][рp]",
-    r"\b(ты|вы|он|она|оно)\s*\bпидарас\b",
-    r"\b(ты|вы|он|она|оно)\s*\bпидор\b",
-    # гандон и обходы
-    r"\bгандон\b",
-    r"\bгандона\b",
-    r"\bгандоны\b",
-    r"г[аa][нn][дd][оo][нn]",
-    r"[гg][аa][нn][дd][оo][нn]",
-    r"г[аa4][нn][дd][оo0][нn]",
-
-    # ты/вы/он/она + гандон
-    r"\b(ты|вы|он|она)\s*г[аa][нn][дd][оo][нn]",
-    r"\b(ты|вы|он|она)\s*\bгандон\b",
-    # хуй тебе и обходы
+    r"\b(ты|вы|он|она|оно)\s*[уy][её][бb][аa][нn]",
+    r"\bтупица\b", r"\bдебил[аку]?\b", r"\bидиот[аку]?\b", r"\bкретин[аку]?\b",
+    r"\bурод(ина|а)?\b", r"\bлошара\b", r"\bлохушка\b", r"\bмразь\b",
+    r"\bтварь\b", r"\bскотина\b", r"\bублюдок\b", r"\bублюдка\b",
+    r"\bпридурок\b", r"\bпридурка\b", r"\bлох\b", r"\bлоха\b",
+    r"\bгандон\b", r"\bгандона\b", r"\bгандоны\b",
+    r"\bхуесос\b", r"\bхуесоска\b",
+    r"\bпидарас\b", r"\bпидараса\b", r"\bпидор\b", r"\bпидора\b",
+    r"\bпидоры\b", r"\bпидорас\b",
+    r"\bуебан\b", r"\bуебана\b", r"\bуебаны\b", r"\bуёбан\b",
+    r"\bчмо\b", r"\bчмошник\b", r"\bчмошница\b",
+    r"\bсучка\b", r"\bсучки\b", r"\bсучку\b", r"\bсука\b", r"\bсуки\b",
+    r"\bблядь\b", r"\bбляди\b", r"\bблядина\b", r"\bшлюха\b", r"\bшлюхи\b",
+    r"\bебанашка\b", r"\bёбанашка\b", r"\bсучонок\b", r"\bсучара\b",
+    r"д[еe3]б[иi1]л", r"[иi1]д[иi1][оo0]т", r"кр[еe3]т[иi1]н",
+    r"т[уy][пп][оo0][йеея]", r"[уу]р[оo0]д", r"[уу]б[лл][юу]д[оo0]к",
+    r"пр[иi1]д[уу]р[оo0]к", r"г[аa][нn][дd][оo][нn]",
+    r"[хx][уy][её][сc][оo][сc]", r"п[иi1][дd][аa][рp][аa][сc]",
+    r"п[иi1][дd][оo][рp]", r"[уy][её][бb][аa][нn]",
+    r"с[уy][чч][кk][аa]", r"с[уy][кk][аa]", r"бл[яy][дd]",
+    r"[её]б[аa][нн][аa][яy]\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда|отчима)",
+    r"[её]б[аa][нн][ыы][йи]\s*(отец|батя|брат|дед|отчим)",
+    r"ид[иi1]\s*[её]б", r"[её]б[иись]\s*(отсюда|нах)",
+    r"за[тт]кни[сс]ь", r"за[тт]кни\s*рот",
+    r"убью\s*(тебя|вас|его|её)", r"прибью\s*(тебя|вас|его|её)",
+    r"н[аa]х[уy][иi]", r"[пp][иi1][зz3][дd][аa]",
+    r"\bпизда\b", r"\bпизды\b", r"\bпизде\b", r"\bпизду\b",
+    r"п[иi1]зд[аaеeуy]", r"п[иi1][зz3]д",
     r"[хx][уy][иiй]\s*[тt][её][бb][её]",
     r"[хx][уy][иiй]\s*[тt][её][бb][яa]",
     r"[хx][уy][иiй]\s*[тt][яy]",
     r"[хx][уy][иiй]\s*[вv][аa][мm]",
-    r"[хx][уy][иiй]\s*[еe][мm][уy]",
-    r"[хx][уy][иiй]\s*[еe][йy]",
-    # хуй тебе в рот и обходы
-    r"[хxХ][уyУ][иiйИ]\s*[тtТ][её][бbБ][её]\s*в\s*р[оoО][тtТ]",
-    r"[хxХ][уyУ][иiйИ]\s*[тtТ][её][бbБ][яaА]\s*в\s*р[оoО][тtТ]",
-    r"[хxХ][уyУ][иiйИ]\s*в\s*р[оoО][тtТ]\s*[тtТ][её][бbБ][её]",
-    r"[хxХ][уyУ][иiйИ]\s*в\s*р[оoО][тtТ]",
-    # в рот тебе дам и обходы
-    r"в\s*р[оo][тt]\s*[тt][её][бb][её]\s*д[аa][мm]",
+    r"[хx][уy][иiй]\s*[тt][её][бb][её]\s*в\s*р[оo][тt]",
+    r"[хx][уy][иiй]\s*в\s*р[оo][тt]",
     r"в\s*р[оo][тt]\s*[тt][её][бb][её]",
-    r"в\s*р[оo][тt]\s*[тt][яy]\s*д[аa][мm]",
-    r"в\s*р[оo][тt]\s*д[аa][мm]\s*[тt][её][бb][её]",
-
-    # тебя ебал... с многоточием и пробелами
-    r"[тt][её][бb][яa]\s*[её][бb][аa][лл][\.…\s]*",
-    r"[тt][её][бb][яa]\s*[эe][бb][аa][лл][\.…\s]*",
-    r"[тt][её][бb][яa]\s*[её][бb][уy][лл][\.…\s]*",
-    # я тебя в рот отъебу и обходы
-    r"[яy]\s*[тt][её][бb][яa]\s*в\s*р[оo][тt]\s*[оo][тt][её][бb][уy]",
-    r"[яy]\s*[тt][её][бb][яa]\s*в\s*р[оo][тt]\s*[её][бb][уy]",
-    r"[яy]\s*[тt][её][бb][яa]\s*в\s*р[оo][тt]",
-
-    # в рот + ебать/ебу и обходы
-    r"в\s*р[оo][тt]\s*[её][бb][аa][тт][ьъ]",
     r"в\s*р[оo][тt]\s*[её][бb][уy]",
-    r"в\s*р[оo][тt]\s*[оo][тt][её][бb][уy]",
-    r"в\s*р[оo][тt]\s*[зz][аa][её][бb][уy]",
-    r"в\s*р[оo][тt]\s*[пp][её][её][бb][уy]",
-
-    # отъебу/отебу тебя
-    r"[оo][тt][её][бb][уy]\s*[тt][её][бb][яa]",
-    r"[оo][тt][её][бb][уy]\s*[тt][яy]",
-    # тебя ебал и обходы
     r"[тt][её][бb][яa]\s*[её][бb][аa][лл]",
     r"[тt][её][бb][яa]\s*[эe][бb][аa][лл]",
-    r"[тt][её][бb][яa]\s*[её][бb][уy][лл]",
     r"[тt][её][бb][яa]\s*[её][бb][уy]",
-    r"[тt][её][бb][яa]\s*[её][бb][уy][тт]",
-
-    # тя ебал (сокращение)
-    r"[тt][яy]\s*[её][бb][аa][лл]",
-    r"[тt][яy]\s*[эe][бb][аa][лл]",
-    r"[тt][яy]\s*[её][бb][уy]",
-
-    # тебя выебал
-    r"[тt][её][бb][яa]\s*в[её][её][бb][аa][лл]",
-    r"[тt][её][бb][яa]\s*[пp][её][её][бb][аa][лл]",
-    r"[тt][её][бb][яa]\s*[зz][аa][её][бb][аa][лл]",
-    # чмо и обходы
-    r"\bчмо\b",
-    r"\bчмошник\b",
-    r"\bчмошница\b",
-    r"[чч][мm][оo]",
-    r"[чч][мm][оo][шш]н[иi]к",
-
-    # иди/ади + чмо
-    r"(иди|ади|вали|пошёл|пошел)\s*[чч][мm][оo]",
-    r"(иди|ади|вали|пошёл|пошел)\s*\bчмо\b",
-
-    # чмо + имя (любое слово после)
-    r"\bчмо\b\s*\w+",
-    r"[чч][мm][оo]\s*\w+",
-
-    # чмо в адрес родственников
-    r"\bчмо\b\s*(твоя?|его|её|ваша?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда|отчима|мачеху)",
-    r"(твоя?|его|её|ваша?)\s*(мать|маму|батя|отец|сестра|брат|бабушка|дед|отчим)\s*\bчмо\b",
-    # тебя ебал и обходы
-    r"[тt][её][бb][яa]\s*[её][бb][аa][лл]",
-    r"[тt][её][бb][яa]\s*[эe][бb][аa][лл]",
-    r"[тt][её][бb][яa]\s*[её][бb][уy][лл]",
-    r"[тt][её][бb][яa]\s*[её][бb][уy]",
-    r"[тt][её][бb][яa]\s*[её][бb][уy][тт]",
-
-    # тя ебал (сокращение)
-    r"[тt][яy]\s*[её][бb][аa][лл]",
-    r"[тt][яy]\s*[эe][бb][аa][лл]",
-    r"[тt][яy]\s*[её][бb][уy]",
-
-    # тебя выебал
-    r"[тt][её][бb][яa]\s*в[её][её][бb][аa][лл]",
-    r"[тt][её][бb][яa]\s*[пp][её][её][бb][аa][лл]",
-    r"[тt][её][бb][яa]\s*[зz][аa][её][бb][аa][лл]",
-    # твоя мать ебаная/хуйня и обходы
-    r"[тt][вv][оo][яy]\s*[Mm]?м[аa][тt][ьъ]\s*[её][бb][аa][нн][аa][яy]",
-    r"[тt][вv][оo][яy]\s*[Mm]?м[аa][тt][ьъ]\s*[хx][уy][иiй][нн][яy]",
-    r"[тt][вv][оo][яy]\s*[Mm]?м[аa][тt][ьъ]\s*[её][бb][аa][нн][аa][яy]\s*[хx][уy][иiй][нн][яy]",
-
-    # ебаная/ёбаная + родственник
-    r"[её][бb][аa][нн][аa][яy]\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда|отчима|мачеху)",
-    r"[её][бb][аa][нн][ыы][йи]\s*(отец|батя|брат|дед|отчим)",
-
-    # хуйня в адрес родственников
-    r"(твоя?|его|её|ваша?)\s*(мать|мама|батя|отец|сестра|брат|бабушка|дед|отчим)\s*[хx][уy][иiй][нн][яy]",
-    r"(твоя?|его|её|ваша?)\s*[Mm][аa][тt][ьъ]\s*[хx][уy][иiй][нн][яy]",
-
-    # мать твою + оскорбление
-    r"м[аa][тt][ьъ]\s*[тt][вv][оo][юy]\s*[её][бb][аa][нн][аa][яy]",
-    r"м[аa][тt][ьъ]\s*[тt][вv][оo][юy]\s*[хx][уy][иiй][нн][яy]",
-    # блядь и обходы
-    r"\bбляди\b",
-    r"\bблядь\b",
-    r"\bбляди\b",
-    r"\bблядина\b",
-    r"\bблядун\b",
-    r"бл[яy][дd][ьъиея]",
-    r"[бb]л[яy][дd]",
-
-    # шлюха и обходы
-    r"\bшлюха\b",
-    r"\bшлюхи\b",
-    r"\bшлюху\b",
-    r"шл[юy][хx][аa]",
-    r"[шш]л[юy][хx]",
-
-    # черт/чёрт как оскорбление в адрес человека
-    r"\b(ты|вы|он|она)\s*(чёрт|черт|чертяка|чертила)",
-    r"\bчертяка\b",
-    r"\bчертила\b",
-    # я твою мать ебал с латинскими буквами и обходы
-    r"[яy]\s*[тt][вv][оo][юy]\s*[Mm][аa][тt][ьъ]\s*[её][бb][аa][лл]",
-    r"[яy]\s*[тt][вv][оo][юy]\s*[Mm][аa][тt][ьъ]\s*[эe][бb][аa][лл]",
-    r"[яy]\s*[тt][вv][оo][юy]\s*[Mm][аa][тt][ьъ]\s*[её][бb][уy]",
-    r"[яy]\s*[тt][вv][оo][юy]\s*m[аa][тt]",
-    # я твоего/твою + родственник + ебал
-    r"[яy]\s*(твоего?|твою|вашего?|вашу)\s*(отчима|мать|маму|батю|отца|сестру|брата|бабушку|деда|папу|мачеху)\s*[её][бb][аa][лл]",
-    r"[яy]\s*(твоего?|твою|вашего?|вашу)\s*(отчима|мать|маму|батю|отца|сестру|брата|бабушку|деда|папу|мачеху)\s*[эe][бb][аa][лл]",
-    r"[яy]\s*(твоего?|твою|вашего?|вашу)\s*(отчима|мать|маму|батю|отца|сестру|брата|бабушку|деда|папу|мачеху)\s*[её][бb][уy]",
-
-    # отчим отдельно
-    r"[её][бb][аa][лл]\s*(твоего?|его|вашего?)\s*отчима",
-    r"[её][бb][уy]\s*(твоего?|его|вашего?)\s*отчима",
-    r"[её][бb][аa][тт][ьъ]\s*(твоего?|его|вашего?)\s*отчима",
-    # мать твою ебал и обходы
-    r"м[аa][тt][ьъ]\s*[тt][вv][оo][юy]\s*[её][бb][аa][лл]",
-    r"м[аa][тt][ьъ]\s*[тt][вv][оo][юy]\s*[эe][бb][аa][лл]",
-    r"м[аa][тt][ьъ]\s*[тt][вv][оo][юy]\s*[её][бb][уy]",
-    r"[тt][вv][оo][юy]\s*м[аa][тt][ьъ]",
-
-    # родственники
-    r"[её][бb][аa][лл]\s*(твою?|его|её|вашу?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда)",
-    r"[её][бb][уy]\s*(твою?|его|её|вашу?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда)",
-    r"[её][бb][аa][тт][ьъ]\s*(твою?|его|её|вашу?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда)",
-    r"(твою?|его|её|вашу?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда)\s*[её][бb][аa][лл]",
-
-    # ёб твою мать и обходы
-    r"[её][бb]\s*[тt][вv][оo][юy]\s*м[аa][тt][ьъ]",
-    r"[её][бb][аa][нн][аa][яy]\s*м[аa][тt][ьъ]",
-    # сучонок, сучара
-    r"\bсучонок\b",
-    r"\bсучонка\b",
-    r"с[уy][чч][оo]н[оo]к",
-    r"\bсучара\b",
-    r"с[уy][чч][аa]р[аa]",
-
-    # ебанашка и обходы
-    r"\bебанашка\b",
-    r"\bёбанашка\b",
-    r"[её]б[аa]н[аa]шк[аa]",
-    r"[её][бb][аa]н[аa][шш][кk]",
-    r"[тt][её][бb][яa]\s*[её][бb][аa][тtт]",
-    # сучка и обходы
-    r"\bсучка\b",
-    r"\bсучки\b",
-    r"\bсучку\b",
-    r"\bсука\b",
-    r"\bсуки\b",
-    r"\bсуку\b",
-    r"с[уy][чч][кk][аa]",
-    r"с[уy][кk][аa]",
-    r"[сc][уy][чч][кk]",
-    r"[сc][уy][кk]",
-    r"с[уy]ч[кk][аa4]",
     r"[тt][её][бb][яa]\s*[её][бb][аa][тт][ьъ]",
-    # тебя ебать и обходы
-    r"[тt][её][бb][яa]\s*[её][бb][аa][тт][ьъ]",
-    r"[тt][её][бb][яa]\s*[эe][бb][аa][тт][ьъ]",
-    r"[тt][её][бb][яa]\s*[её][бb][уy][тт][ьъ]",
-    r"[тt][её][бb][яa]\s*[её][бb][иi][тт][ьъ]",
-    # ебать тебя и обходы
-    r"[её]б[аa][тт][ьъ]\s*(тебя|вас|его|её|тебе)",
-    r"[её]б[аa][тт][ьъ]\s*[тt][её]б[яa]",
-    r"[её][бb][аa][тt][ьъ]\s*[тt][её][бb][яa]",
-
-    # я тебя эбал и обходы
+    r"[тt][её][бb][яa]\s*[её][бb][аa][тт]",
     r"[яy]\s*[тt][её][бb][яa]\s*[её][бb][аa][лл]",
     r"[яy]\s*[тt][её][бb][яa]\s*[эe][бb][аa][лл]",
     r"[яy]\s*[тt][её][бb][яa]\s*[её][бb][уy]",
-
-    # иди/пошёл + ебать
-    r"[её]б[уy]\s*(тебя|вас|его|её)",
-    r"[её][бb][уy][тт][ьъ]\s*(тебя|вас)",
-
-    # общие направленные
-    r"[её]б[аaуy][лнтщ]+\s*(тебя|тебе|вас|его|её)",
-    # иди на хуй с пробелами и обходами
-    r"иди\s+на\s+х[уy][иiй]",
-    r"иди\s+на\s+[хx][уy][иiй]",
-    r"ид[и1]\s+на\s+[хx][уy][иiй]",
-    r"иди\s*на\s*[хx][уy][иiй]",
-
-    # хуй тебе
-    r"х[уy][иiй]\s*(тебе|тебя|вам|ему|ей)",
-    r"[хx][уy][иiй]\s*(тебе|тебя|вам|ему|ей)",
-
-    # лох без ты
-    r"\bлох\b",
-    r"\bлоха\b",
-    r"\bлохи\b",
-    r"\bлохов\b",
-    r"л[оo][хx]",
-    r"\bдаун\b",
-    r"\bдауна\b",
-    r"\bдауны\b",
-    r"д[аa][уy]н",
-    r"\bэблан\b",
-    r"\bэблана\b",
-    r"[эe]бл[аa]н",
-    r"[эe]б[лl][аa4]н",
-    r"иди\s*на[хx\*х]+",
-    r"иди\s*н[4а][хx\*х]",
-    r"ид[и1]\s*на[хx\*х]",
-    r"пошёл?\s*на[хx\*х]",
-    r"пош[её]л\s*на[хx\*х]",
-    r"вали\s*на[хx\*х]",
-    r"\b(ты|вы|он|она)\s*(тупой|тупая|тупые|тупо[ей])",
-    r"\b(ты|вы|он|она)\s*(идиот|идиотка|дебил|дебилка|кретин|кретинка)",
-    r"\b(ты|вы|он|она)\s*(урод|уродина|урода)",
-    r"\b(ты|вы|он|она)\s*(лох|лоха|лошара|лохушка)",
-    r"\b(ты|вы|он|она)\s*(мразь|тварь|скотина|ублюдок|ублюдка)",
-    r"\b(ты|вы|он|она)\s*(придурок|придурка|даун|дауна)",
-    r"\b(ты|вы|он|она)\s*(нуб|нубас|нубик)",
-    r"\bтупица\b",
-    r"\bдебил[аку]?\b",
-    r"\bидиот[аку]?\b",
-    r"\bкретин[аку]?\b",
-    r"\bурод(ина|а)?\b",
-    r"\bлошара\b",
-    r"\bлохушка\b",
-    r"\bмразь\b",
-    r"\bтварь\b",
-    r"\bскотина\b",
-    r"\bублюдок\b",
-    r"\bублюдка\b",
-    r"\bпридурок\b",
-    r"\bпридурка\b",
-    r"д[еe3]б[иi1]л",
-    r"[иi1]д[иi1][оo0]т",
-    r"кр[еe3]т[иi1]н",
-    r"т[уy][пп][оo0][йеея]",
-    r"[уу]р[оo0]д",
-    r"[уу]б[лл][юу]д[оo0]к",
-    r"пр[иi1]д[уу]р[оo0]к",
-    r"ид[иi1]\s*[её]б",
-    r"[её]б[иись]\s*(отсюда|нах)",
-    r"за[тт]кни[сс]ь",
-    r"за[тт]кни\s*рот",
-    r"убью\s*(тебя|вас|его|её)",
-    r"прибью\s*(тебя|вас|его|её)",
-    r"н[аa]х[уy][иi]",
-    r"[пp][иi1][зz3][дd][аa]",
-    r"\bпизда\b",
-    r"\bпизды\b",
-    r"\bпизде\b",
-    r"\bпизду\b",
-    r"п[иi1]зд[аaеeуy]",
-    r"п[иi1][зz3]д",
-    r"[пp][иi1][зz3][дd]",
+    r"[яy]\s*[тt][её][бb][яa]\s*в\s*р[оo][тt]",
+    r"[яy]\s*[тt][вv][оo][юy]\s*м[аa][тt][ьъ]\s*[её][бb][аa][лл]",
+    r"[яy]\s*[тt][вv][оo][юy]\s*[Mm][аa][тt][ьъ]\s*[её][бb][аa][лл]",
+    r"м[аa][тt][ьъ]\s*[тt][вv][оo][юy]\s*[её][бb][аa][нн][аa][яy]",
+    r"[тt][вv][оo][юy]\s*м[аa][тt][ьъ]\s*[её][бb][аa][нн][аa][яy]",
+    r"[тt][вv][оo][юy]\s*[Mm][аa][тt][ьъ]\s*[хx][уy][иiй][нн][яy]",
+    r"[её][бb][аa][тт][ьъ]\s*(твою?|его|её|вашу?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда|отчима)",
+    r"[её][бb][уy]\s*(твою?|его|её|вашу?)\s*(мать|маму|батю|отца|сестру|брата|бабушку|деда|отчима)",
+    r"[яy]\s*(твоего?|твою|вашего?|вашу)\s*(отчима|мать|маму|батю|отца|сестру|брата|бабушку|деда|папу|мачеху)\s*[её][бb][аa][лл]",
+    r"(иди|ади|вали|пошёл|пошел)\s*[чч][мm][оo]",
 ]
 
 COMPILED_PATTERNS = [
@@ -348,25 +109,15 @@ def contains_insult(text):
             return True
     return False
 
-async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_enabled
-    if update.message.from_user.id != OWNER_ID:
-        return
-    bot_enabled = not bot_enabled
-    status = "✅ Бот включён — модерация активна." if bot_enabled else "❌ Бот выключен — модерация остановлена."
-    await update.message.reply_text(status)
-
+# ── Снятие мута ───────────────────────────────────────────────────────────────
 async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
     await asyncio.sleep(15)
     try:
         await bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=user_id,
+            chat_id=chat_id, user_id=user_id,
             permissions=ChatPermissions(
-                can_send_messages=True,
-                can_send_polls=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True,
+                can_send_messages=True, can_send_polls=True,
+                can_send_other_messages=True, can_add_web_page_previews=True,
             ),
         )
     except Exception as e:
@@ -385,22 +136,96 @@ async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
     except Exception as e:
         print(f"[ОШИБКА] Сообщение о снятии мута: {e}")
 
+# ── Выдача мута ───────────────────────────────────────────────────────────────
+async def do_mute(context, chat_id, user_id, mention, reason="оскорбление"):
+    global total_violations
+    mute_until = datetime.now(timezone.utc) + timedelta(seconds=20)
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat_id, user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=False, can_send_polls=False,
+                can_send_other_messages=False, can_add_web_page_previews=False,
+            ),
+            until_date=mute_until,
+        )
+    except Exception as e:
+        print(f"[ОШИБКА] Мут: {e}")
+
+    total_violations += 1
+    stats[user_id]["violations"] += 1
+
+    try:
+        mute_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🔇 {mention} получил мут на <b>15 секунд</b> за {reason}.\n"
+                f"❌ Сообщение удалено.\n"
+                f"⏳ Писать снова можно будет через <b>15 секунд</b>."
+            ),
+            parse_mode="HTML",
+        )
+        asyncio.ensure_future(unmute_user(context.bot, chat_id, user_id, mention, mute_msg.message_id))
+    except Exception as e:
+        print(f"[ОШИБКА] Сообщение о муте: {e}")
+
+# ── Приветствие новых участников ──────────────────────────────────────────────
+async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        mention = f'<a href="tg://user?id={member.id}">{member.first_name}</a>'
+        await update.message.reply_text(
+            f"👋 Привет, {mention}! Добро пожаловать в группу!\n"
+            f"📋 Маты разрешены, оскорбления — нет.",
+            parse_mode="HTML",
+        )
+
+# ── Основной обработчик сообщений ─────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_enabled:
         return
-
     message = update.message
     if not message or not message.text:
         return
     if message.chat.type not in ("group", "supergroup"):
         return
 
-    text = message.text
-    if not contains_insult(text):
-        return
-
     user = message.from_user
     chat_id = message.chat_id
+    text = message.text
+    now = datetime.now(timezone.utc)
+
+    stats[user.id]["name"] = user.first_name
+    mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+
+    # Антифлуд — больше 5 сообщений за 5 секунд
+    user_messages[user.id] = [t for t in user_messages[user.id] if (now - t).seconds < 5]
+    user_messages[user.id].append(now)
+    if len(user_messages[user.id]) > 5:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
+        except Exception:
+            pass
+        await do_mute(context, chat_id, user.id, mention, "флуд")
+        return
+
+    # Антиспам — одно и то же сообщение 3 раза подряд
+    if text == user_last_msg[user.id]:
+        user_repeat[user.id] += 1
+        if user_repeat[user.id] >= 3:
+            user_repeat[user.id] = 0
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
+            except Exception:
+                pass
+            await do_mute(context, chat_id, user.id, mention, "спам")
+            return
+    else:
+        user_repeat[user.id] = 0
+        user_last_msg[user.id] = text
+
+    # Фильтр оскорблений
+    if not contains_insult(text):
+        return
 
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
@@ -408,45 +233,129 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[ОШИБКА] Удаление: {e}")
         return
 
-    mute_until = datetime.now(timezone.utc) + timedelta(seconds=15)
-    try:
-        await context.bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=user.id,
-            permissions=ChatPermissions(
-                can_send_messages=False,
-                can_send_polls=False,
-                can_send_other_messages=False,
-                can_add_web_page_previews=False,
-            ),
-            until_date=mute_until,
-        )
-    except Exception as e:
-        print(f"[ОШИБКА] Мут: {e}")
+    # Система предупреждений
+    warnings[user.id] += 1
+    warn_count = warnings[user.id]
 
-    mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+    if warn_count < WARN_LIMIT:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⚠️ {mention}, предупреждение <b>{warn_count}/{WARN_LIMIT}</b> за оскорбление.\n"
+                    f"❌ Сообщение удалено.\n"
+                    f"{'🔇 На следующем нарушении получишь мут!' if warn_count == WARN_LIMIT - 1 else ''}"
+                ),
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            print(f"[ОШИБКА] Предупреждение: {e}")
+    else:
+        warnings[user.id] = 0
+        await do_mute(context, chat_id, user.id, mention, "оскорбление")
 
-    try:
-        mute_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"🔇 {mention} получил мут на <b>15 секунд</b> за оскорбление.\n"
-                f"❌ Сообщение удалено.\n"
-                f"⏳ Писать снова можно будет через <b>15 секунд</b>."
-            ),
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        print(f"[ОШИБКА] Сообщение о муте: {e}")
+# ── Команды ───────────────────────────────────────────────────────────────────
+async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global bot_enabled
+    if update.message.from_user.id != OWNER_ID:
         return
+    bot_enabled = not bot_enabled
+    status = "✅ Бот включён — модерация активна." if bot_enabled else "❌ Бот выключен — модерация остановлена."
+    await update.message.reply_text(status)
 
-    asyncio.ensure_future(
-        unmute_user(context.bot, chat_id, user.id, mention, mute_msg.message_id)
+async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы замутить.")
+        return
+    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
+    if member.status not in ("administrator", "creator"):
+        return
+    target = update.message.reply_to_message.from_user
+    mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
+    await do_mute(context, update.message.chat_id, target.id, mention, "решение админа")
+
+async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы размутить.")
+        return
+    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
+    if member.status not in ("administrator", "creator"):
+        return
+    target = update.message.reply_to_message.from_user
+    await context.bot.restrict_chat_member(
+        chat_id=update.message.chat_id, user_id=target.id,
+        permissions=ChatPermissions(
+            can_send_messages=True, can_send_polls=True,
+            can_send_other_messages=True, can_add_web_page_previews=True,
+        ),
     )
+    await update.message.reply_text(f"🔊 {target.first_name} размучен.")
+
+async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы забанить.")
+        return
+    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
+    if member.status not in ("administrator", "creator"):
+        return
+    target = update.message.reply_to_message.from_user
+    await context.bot.ban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+    await update.message.reply_text(f"🚫 {target.first_name} забанен.")
+
+async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы кикнуть.")
+        return
+    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
+    if member.status not in ("administrator", "creator"):
+        return
+    target = update.message.reply_to_message.from_user
+    await context.bot.ban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+    await context.bot.unban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+    await update.message.reply_text(f"👢 {target.first_name} кикнут.")
+
+async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы выдать предупреждение.")
+        return
+    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
+    if member.status not in ("administrator", "creator"):
+        return
+    target = update.message.reply_to_message.from_user
+    warnings[target.id] += 1
+    mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
+    await update.message.reply_text(
+        f"⚠️ {mention} получил предупреждение <b>{warnings[target.id]}/{WARN_LIMIT}</b>.",
+        parse_mode="HTML",
+    )
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"📊 Всего нарушений поймано ботом: <b>{total_violations}</b>",
+        parse_mode="HTML",
+    )
+
+async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not stats:
+        await update.message.reply_text("📊 Нарушений пока не было.")
+        return
+    sorted_users = sorted(stats.items(), key=lambda x: x[1]["violations"], reverse=True)[:5]
+    text = "🏆 <b>Топ нарушителей:</b>\n\n"
+    for i, (uid, data) in enumerate(sorted_users, 1):
+        text += f"{i}. {data['name']} — <b>{data['violations']}</b> нарушений\n"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("bot", toggle_bot))
+    app.add_handler(CommandHandler("mute", cmd_mute))
+    app.add_handler(CommandHandler("unmute", cmd_unmute))
+    app.add_handler(CommandHandler("ban", cmd_ban))
+    app.add_handler(CommandHandler("kick", cmd_kick))
+    app.add_handler(CommandHandler("warn", cmd_warn))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("top", cmd_top))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("Бот запущен.")
     app.run_polling(allowed_updates=["message"])
