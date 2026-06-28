@@ -2,12 +2,13 @@ import re
 import asyncio
 from datetime import datetime, timedelta, timezone
 from telegram import Update, ChatPermissions
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 BOT_TOKEN = "8422286281:AAFDqQ1xhPem2Bpc4D_b0I6aRF7zH0C1dFo"
+OWNER_ID = 123456789  # замени на свой Telegram ID
+bot_enabled = True
 
 INSULT_PATTERNS = [
-    # даун и обходы
     r"\bдаун\b",
     r"\bдауна\b",
     r"\bдауны\b",
@@ -58,6 +59,13 @@ INSULT_PATTERNS = [
     r"прибью\s*(тебя|вас|его|её)",
     r"н[аa]х[уy][иi]",
     r"[пp][иi1][зz3][дd][аa]",
+    r"\bпизда\b",
+    r"\bпизды\b",
+    r"\bпизде\b",
+    r"\bпизду\b",
+    r"п[иi1]зд[аaеeуy]",
+    r"п[иi1][зz3]д",
+    r"[пp][иi1][зz3][дd]",
 ]
 
 COMPILED_PATTERNS = [
@@ -69,6 +77,14 @@ def contains_insult(text):
         if pattern.search(text):
             return True
     return False
+
+async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global bot_enabled
+    if update.message.from_user.id != OWNER_ID:
+        return
+    bot_enabled = not bot_enabled
+    status = "✅ Бот включён — модерация активна." if bot_enabled else "❌ Бот выключен — модерация остановлена."
+    await update.message.reply_text(status)
 
 async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
     await asyncio.sleep(30)
@@ -100,6 +116,9 @@ async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
         print(f"[ОШИБКА] Сообщение о снятии мута: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not bot_enabled:
+        return
+
     message = update.message
     if not message or not message.text:
         return
@@ -141,7 +160,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mute_msg = await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"🔇 {mention} получил мут на <b>30 секунд</b> за оскорбление 🖕\n"
+                f"🔇 {mention} получил мут на <b>30 секунд</b> за оскорбление.\n"
                 f"❌ Сообщение удалено.\n"
                 f"⏳ Писать снова можно будет через <b>30 секунд</b>."
             ),
@@ -157,6 +176,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("bot", toggle_bot))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("Бот запущен.")
     app.run_polling(allowed_updates=["message"])
