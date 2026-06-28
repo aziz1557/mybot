@@ -344,7 +344,31 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, (uid, data) in enumerate(sorted_users, 1):
         text += f"{i}. {data['name']} — <b>{data['violations']}</b> нарушений\n"
     await update.message.reply_text(text, parse_mode="HTML")
+async def handle_flood_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not bot_enabled:
+        return
+    message = update.message
+    if not message:
+        return
+    if message.chat.type not in ("group", "supergroup"):
+        return
 
+    user = message.from_user
+    chat_id = message.chat_id
+    now = datetime.now(timezone.utc)
+
+    stats[user.id]["name"] = user.first_name
+    mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+
+    # Антифлуд стикеры и гифки
+    user_messages[user.id] = [t for t in user_messages[user.id] if (now - t).seconds < 5]
+    user_messages[user.id].append(now)
+    if len(user_messages[user.id]) > 5:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
+        except Exception:
+            pass
+        await do_mute(context, chat_id, user.id, mention, "флуд стикерами/гифками")
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("bot", toggle_bot))
@@ -356,7 +380,9 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("top", cmd_top))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(MessageHandler(filters.Sticker.ALL, handle_flood_only))
+app.add_handler(MessageHandler(filters.ANIMATION, handle_flood_only))
     print("Бот запущен.")
     app.run_polling(allowed_updates=["message"])
 
