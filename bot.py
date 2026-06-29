@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     MessageHandler,
     CommandHandler,
     ContextTypes,
@@ -21,7 +22,35 @@ BOT_TOKEN = "8422286281:AAGcb2_M7l2Aly7XohtRE2p296hNsW0nDvQ"
 OWNER_ID = 5742325054
 bot_enabled = True        # Весь бот (команды + модерация)
 moderation_enabled = True # Только модерация (фильтр оскорблений)
-chat_locked = False       # Заглушка чата
+locked_chats = set()              # chat_id групп с заглушкой
+saved_chat_permissions = {}       # сохранённые права перед заглушкой
+
+OPEN_CHAT_PERMISSIONS = ChatPermissions(
+    can_send_messages=True,
+    can_send_audios=True,
+    can_send_documents=True,
+    can_send_photos=True,
+    can_send_videos=True,
+    can_send_video_notes=True,
+    can_send_voice_notes=True,
+    can_send_polls=True,
+    can_send_other_messages=True,
+    can_add_web_page_previews=True,
+    can_invite_users=True,
+)
+
+LOCKED_CHAT_PERMISSIONS = ChatPermissions(
+    can_send_messages=False,
+    can_send_audios=False,
+    can_send_documents=False,
+    can_send_photos=False,
+    can_send_videos=False,
+    can_send_video_notes=False,
+    can_send_voice_notes=False,
+    can_send_polls=False,
+    can_send_other_messages=False,
+    can_add_web_page_previews=False,
+)
 
 DATA_FILE = "bot_data.json"
 LOG_FILE = "bot_log.txt"
@@ -48,544 +77,6 @@ user_info        = _data.get("user_info", {})
 
 user_last_msg = defaultdict(str)
 user_repeat   = defaultdict(int)
-
-# ================== СИСТЕМА МАФИИ И ЭКОНОМИКИ ==================
-
-mafia_games = {}
-
-ROLES = {
-    "mafia": "🔪 Мафия",
-    "doctor": "❤️ Доктор",
-    "civilian": "👤 Мирный житель",
-}
-
-MIN_PLAYERS = 4
-MAX_PLAYERS = 20
-
-# Проверка и инициализация базовых полей экономики для пользователя
-def init_economy_fields(uid, name, username=""):
-    if uid not in user_info:
-        user_info[uid] = {
-            "name": name,
-            "username": username,
-            "joined": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "violations": 0,
-            "money": 500,
-            "gems": 10,
-            "buffs": []
-        }
-    if "money" not in user_info[uid]: user_info[uid]["money"] = 500
-    if "gems" not in user_info[uid]: user_info[uid]["gems"] = 10
-    if "buffs" not in user_info[uid]: user_info[uid]["buffs"] = []
-    save_data()
-
-# ── Функция обновления сообщения набора в группу (Лобби) ──────────────────────
-async def update_lobby_message(bot, chat_id):
-    game = mafia_games[chat_id]
-    bot_obj = await bot.get_me()
-    bot_username = bot_obj.username
-    
-    # Кнопка «Присоединиться» — это deep link (переход в ЛС к боту с ID чата)
-    keyboard = [
-        [
-            InlineKeyboardButton("➕ Присоединиться", url=f"https://t.me/{bot_username}?start=join_{chat_id}")
-        ],
-        [
-            InlineKeyboardButton("▶ Начать", callback_data="mafia_start"),
-            InlineKeyboardButton("❌ Отменить", callback_data="mafia_cancel")
-        ]
-    ]
-    
-    players_list = "\n".join([f"• {name}" for name in game["players"].values()])
-    text = (
-        "🎭 <b>Ведётся набор в игру «Мафия»!</b>\n\n"
-        f"👥 Игроков: {len(game['players'])}/{MAX_PLAYERS}\n"
-        f"⚠️ Минимум для старта: {MIN_PLAYERS}\n\n"
-        f"<b>Текущее лобби:</b>\n{players_list}\n\n"
-        "Нажмите кнопку ниже, чтобы войти в игру через ЛС бота! ❤️"
-    )
-    
-    try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=game["message_id"],
-            text=text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    except Exception as e:
-        print(f"[ОШИБКА] Обновление лобби: {e}")
-
-# ── Создание игры в группе ───────────────────────────────────────────────────
-async def mafia_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if update.message.chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("❌ Игру можно запустить только в группе!")
-        return
-
-    if chat_id in mafia_games:
-        await update.message.reply_text("❌ В этом чате уже идёт игра или сбор лобби!")
-        return
-
-    mafia_games[chat_id] = {
-        "owner": update.effective_user.id,
-        "players": {update.effective_user.id: update.effective_user.first_name},
-        "started": False,
-        "message_id": None,
-        "status": "lobby",
-        "roles": {},
-        "alive": [],
-        "votes": {},
-        "voted": [],
-        "night_kill": None,
-        "night_heal": None,
-        "last_word_user": None
-    }
-    
-    init_economy_fields(str(update.effective_user.id), update.effective_user.first_name, update.effective_user.username or "")
-    
-    bot_obj = await context.bot.get_me()
-    bot_username = bot_obj.username
-
-    keyboard = [
-        [InlineKeyboardButton("➕ Присоединиться", url=f"https://t.me/{bot_username}?start=join_{chat_id}")],
-        [
-            InlineKeyboardButton("▶ Начать", callback_data="mafia_start"),
-            InlineKeyboardButton("❌ Отменить", callback_data="mafia_cancel")
-        ]
-    ]
-
-    text = (
-        "🎭 <b>Ведётся набор в игру «Мафия»!</b>\n\n"
-        f"👥 Игроков: 1/{MAX_PLAYERS}\n"
-        f"⚠️ Минимум для старта: {MIN_PLAYERS}\n\n"
-        f"<b>Текущее лобби:</b>\n• {update.effective_user.first_name}\n\n"
-        "Нажмите кнопку ниже, чтобы войти в игру через ЛС бота! ❤️"
-    )
-
-    msg = await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-    mafia_games[chat_id]["message_id"] = msg.message_id
-
-# ── Хэндлер кнопок управления лобби и игровых действий ────────────────────────
-async def mafia_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat.id
-    uid = query.from_user.id
-
-    # Логика голосования днем в группе
-    if query.data.startswith("mafia_vote_"):
-        target_id = int(query.data.split("_")[2])
-        found_chat = None
-        for c_id, g in mafia_games.items():
-            if g.get("status") == "voting" and uid in g["alive"]:
-                found_chat = c_id
-                break
-        if not found_chat:
-            await query.answer("❌ Вы не можете голосовать сейчас!", show_alert=True)
-            return
-            
-        g = mafia_games[found_chat]
-        if uid in g["voted"]:
-            await query.answer("❌ Вы уже отдали свой голос!", show_alert=True)
-            return
-            
-        g["voted"].append(uid)
-        if target_id not in g["votes"]:
-            g["votes"][target_id] = []
-        g["votes"][target_id].append(uid)
-        await query.answer(f"✅ Голос против {g['players'][target_id]} засчитан!")
-        return
-
-    # Логика ночных скрытых действий в ЛС бота
-    if query.data.startswith("mafia_target_"):
-        parts = query.data.split("_")
-        target_id = int(parts[2])
-        g_chat_id = int(parts[3])
-        
-        if g_chat_id not in mafia_games:
-            await query.answer("❌ Игра уже завершена.", show_alert=True)
-            return
-            
-        g = mafia_games[g_chat_id]
-        role = g["roles"].get(uid)
-        
-        if g["status"] != "night" or uid not in g["alive"]:
-            await query.answer("❌ Вы не можете сделать ход.", show_alert=True)
-            return
-            
-        if role == "mafia":
-            g["night_kill"] = target_id
-            await query.edit_message_text(f"🔪 Цель выбрана! Ночью вы убьёте: <b>{g['players'][target_id]}</b>", parse_mode="HTML")
-        elif role == "doctor":
-            g["night_heal"] = target_id
-            await query.edit_message_text(f"❤️ Выбор сделан! Ночью вы вылечите: <b>{g['players'][target_id]}</b>", parse_mode="HTML")
-        return
-
-    # Управление лобби
-    if chat_id not in mafia_games:
-        return
-    game = mafia_games[chat_id]
-
-    if query.data == "mafia_cancel":
-        if uid != game["owner"]:
-            await query.answer("❌ Только создатель лобби может отменить игру.", show_alert=True)
-            return
-        del mafia_games[chat_id]
-        await query.edit_message_text("❌ Сбор лобби отменен создателем.")
-        return
-
-    elif query.data == "mafia_start":
-        if uid != game["owner"]:
-            await query.answer("❌ Только создатель лобби может запустить игру.", show_alert=True)
-            return
-        if len(game["players"]) < MIN_PLAYERS:
-            await query.answer(f"⚠️ Мало людей! Нужно минимум {MIN_PLAYERS} игрока.", show_alert=True)
-            return
-
-        game["started"] = True
-        await query.edit_message_text("🎲 <b>Роли распределяются! Проверьте личные сообщения с ботом...</b>", parse_mode="HTML")
-        
-        roles_ok = await mafia_send_roles(context, chat_id)
-        if roles_ok:
-            asyncio.create_task(run_game_cycle(context, chat_id))
-
-# ── Распределение ролей в ЛС ─────────────────────────────────────────────────
-async def mafia_send_roles(context, chat_id):
-    game = mafia_games[chat_id]
-    players = list(game["players"].items())
-    random.shuffle(players)
-    count = len(players)
-
-    if count <= 5:
-        mafia_count = 1
-    elif count <= 8:
-        mafia_count = 2
-    else:
-        mafia_count = 3
-
-    roles = ["mafia"] * mafia_count + ["doctor"]
-    while len(roles) < count:
-        roles.append("civilian")
-    random.shuffle(roles)
-
-    game["roles"] = {}
-    for (uid, name), role in zip(players, roles):
-        game["roles"][uid] = role
-        try:
-            if role == "mafia":
-                text = "🔪 <b>Ты — Мафия!</b>\n\nТвоя задача — уничтожить мирных жителей и остаться незамеченным. Каждую ночь выбирай жертву."
-            elif role == "doctor":
-                text = "❤️ <b>Ты — Доктор!</b>\n\nКаждую ночь ты можешь спасти одного человека от нападения мафии. Себя лечить тоже можно!"
-            else:
-                text = "👨🏼 <b>Ты — Мирный житель!</b>\n\nТвоя задача вычислить коварную мафию и на городском собрании (днём) линчевать засранцев."
-            
-            await context.bot.send_message(uid, text, parse_mode="HTML")
-        except Exception:
-            await context.bot.send_message(
-                chat_id,
-                f"❌ Игрок <b>{name}</b> не запустил бота в ЛС!\nИгра отменена. Пожалуйста, откройте чат с ботом, нажмите /start и соберите лобби заново.",
-                parse_mode="HTML"
-            )
-            del mafia_games[chat_id]
-            return False
-    return True
-
-# ── Главный автоматический игровой цикл ───────────────────────────────────────
-async def run_game_cycle(context, chat_id):
-    if chat_id not in mafia_games: return
-    game = mafia_games[chat_id]
-    game["alive"] = list(game["players"].keys())
-    
-    await asyncio.sleep(2)
-    
-    while True:
-        # Проверка победы перед началом фазы
-        winner = check_mafia_winners(game)
-        if winner:
-            await finish_mafia_game(context, chat_id, winner)
-            break
-            
-        # ─── ФАЗА: НОЧЬ ───
-        game["status"] = "night"
-        game["night_kill"] = None
-        game["night_heal"] = None
-        
-        alive_list = "\n".join([f"• {game['players'][p]}" for p in game["alive"]])
-        await context.bot.send_message(
-            chat_id,
-            f"🌌 <b>Наступает ночь.</b> Город засыпает, на улицы выходят темные личности...\n\n"
-            f"<b>Живые в игре:</b>\n{alive_list}\n\n"
-            f"⏳ У активных ролей есть 35 секунд на выбор действий в ЛС бота!",
-            parse_mode="HTML"
-        )
-        
-        # Запрос действий в ЛС у живых ролей
-        target_buttons = [[InlineKeyboardButton(game["players"][p], callback_data=f"mafia_target_{p}_{chat_id}")] for p in game["alive"]]
-        night_markup = InlineKeyboardMarkup(target_buttons)
-        
-        for p_id in game["alive"]:
-            role = game["roles"][p_id]
-            try:
-                if role == "mafia":
-                    await context.bot.send_message(p_id, "🌙 Ночь! Выберите, кого хотите убрать из игры:", reply_markup=night_markup)
-                elif role == "doctor":
-                    await context.bot.send_message(p_id, "🌙 Ночь! Выберите, кого хотите излечить:", reply_markup=night_markup)
-            except Exception: pass
-            
-        await asyncio.sleep(35) # Таймер ночи
-        
-        # ─── ФАЗА: ДЕНЬ ───
-        game["status"] = "day"
-        victim = game["night_kill"]
-        saved = game["night_heal"]
-        
-        day_text = "🌅 <b>День Х. Солнце всходит, подсушивая на тротуарах пролитую ночью кровь...</b>\n\n"
-        died_user = None
-        
-        if victim and victim != saved:
-            died_user = victim
-            game["alive"].remove(victim)
-            role_ru = ROLES.get(game["roles"][victim], "Мирный житель")
-            day_text += f"💀 Сегодня ночью был жестоко убит {role_ru} — <b>{game['players'][victim]}</b>.\n"
-        else:
-            day_text += "🕊️ Удивительно, но ночь прошла спокойно! Доктор сработал отлично, либо мафия промахнулась.\n"
-            
-        mafia_cnt = sum(1 for p in game["alive"] if game["roles"][p] == "mafia")
-        doc_cnt = sum(1 for p in game["alive"] if game["roles"][p] == "doctor")
-        civ_cnt = sum(1 for p in game["alive"] if game["roles"][p] == "civilian")
-        day_text += f"\n📊 Кто-то из них: Мафия ({mafia_cnt}), Доктор ({doc_cnt}), Мирные ({civ_cnt}). Всего: {len(game['alive'])} чел."
-        
-        await context.bot.send_message(chat_id, day_text, parse_mode="HTML")
-        
-        # Логика предсмертной записки в ЛС убитому
-        if died_user:
-            game["last_word_user"] = died_user
-            try:
-                await context.bot.send_message(died_user, "💀 Тебя убили! Напиши сюда текст своего предсмертного послания, и я перешлю его в группу:")
-            except Exception: pass
-            await asyncio.sleep(15) # Ожидание текста предсмертной записки
-            game["last_word_user"] = None
-            
-        # Проверка победы после ночных убийств
-        winner = check_mafia_winners(game)
-        if winner:
-            await finish_mafia_game(context, chat_id, winner)
-            break
-            
-        # ─── ФАЗА: ГОЛОСОВАНИЕ ───
-        game["status"] = "voting"
-        game["votes"] = {}
-        game["voted"] = []
-        
-        vote_buttons = [[InlineKeyboardButton(game["players"][p], callback_data=f"mafia_vote_{p}")] for p in game["alive"]]
-        
-        vote_msg = await context.bot.send_message(
-            chat_id,
-            "⚖️ <b>Пришло время определить и наказать виноватых.</b>\n"
-            "Голосование открыто! Нажмите кнопку с подозреваемым.\n"
-            "⏳ Голосование продлится 35 секунд.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(vote_buttons)
-        )
-        
-        await asyncio.sleep(35) # Таймер голосования
-        
-        try: await context.bot.edit_message_reply_markup(chat_id, vote_msg.message_id, reply_markup=None)
-        except Exception: pass
-        
-        if not game["votes"]:
-            await context.bot.send_message(chat_id, "Голосование окончено. Мнения жителей разошлись... так никого и не повесив... 🕊️")
-        else:
-            max_v = -1
-            lynched = None
-            is_tie = False
-            for p_id, voters in game["votes"].items():
-                if len(voters) > max_v:
-                    max_v = len(voters)
-                    lynched = p_id
-                    is_tie = False
-                elif len(voters) == max_v:
-                    is_tie = True
-                    
-            if is_tie or max_v == 0:
-                await context.bot.send_message(chat_id, "Голосование окончено. Мнения жителей разошлись... так никого и не повесив... 🕊️")
-            else:
-                game["alive"].remove(lynched)
-                role_ru = ROLES.get(game["roles"][lynched], "Мирный житель")
-                await context.bot.send_message(
-                    chat_id,
-                    f"⚖️ Суд Линча состоялся! Большинством в {max_v} голосов жители казнили <b>{game['players'][lynched]}</b>.\n"
-                    f"Обыск показал, что он был: {role_ru}."
-                )
-        await asyncio.sleep(3)
-
-# ── Проверка условий победы ──────────────────────────────────────────────────
-def check_mafia_winners(game):
-    mafia_cnt = sum(1 for p in game["alive"] if game["roles"][p] == "mafia")
-    peaceful_cnt = sum(1 for p in game["alive"] if game["roles"][p] in ("civilian", "doctor"))
-    
-    if mafia_cnt == 0:
-        return "civilians"
-    if mafia_cnt >= peaceful_cnt:
-        return "mafia"
-    return None
-
-# ── Завершение игры, раздача наград и профиль экономики ───────────────────────
-async def finish_mafia_game(context, chat_id, winner):
-    game = mafia_games[chat_id]
-    
-    win_title = "🏆 <b>Победили Мирные жители!</b> Город чист." if winner == "civilians" else "🏆 <b>Победила Мафия!</b> Преступники захватили контроль."
-    
-    summary = f"🎉 <b>Игра окончена!</b>\n\n{win_title}\n\n👥 <b>Роли всех участников:</b>\n"
-    for p_id, name in game["players"].items():
-        role_key = game["roles"][p_id]
-        role_ru = ROLES.get(role_key, "Мирный")
-        status_str = "🟢 Жив" if p_id in game["alive"] else "💀 Мертв"
-        summary += f"• {name} — {role_ru} ({status_str})\n"
-        
-        # Раздача денег
-        uid_str = str(p_id)
-        init_economy_fields(uid_str, name)
-        
-        is_winner = (winner == "mafia" and role_key == "mafia") or (winner == "civilians" and role_key in ("civilian", "doctor"))
-        reward = 350 if is_winner else 120
-        user_info[uid_str]["money"] += reward
-        
-        try:
-            await context.bot.send_message(
-                p_id,
-                f"📊 Игра в группе завершена!\n"
-                f"Вы получили: 💵 <b>{reward} монет</b>.\n"
-                f"Твой новый баланс: 💵 {user_info[uid_str]['money']}\n"
-                f"Напиши /profile в ЛС, чтобы открыть магазин бонусов и баффов ролей!",
-                parse_mode="HTML"
-            )
-        except Exception: pass
-        
-    save_data()
-    await context.bot.send_message(chat_id, summary, parse_mode="HTML")
-    if chat_id in mafia_games:
-        del mafia_games[chat_id]
-
-# ── Личный профиль и Магазин баффов ролей (В ЛС) ──────────────────────────────
-async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type in ("group", "supergroup"):
-        await update.message.reply_text("🏦 Твой профиль доступен только в личных сообщениях с ботом! Напиши мне в ЛС.")
-        return
-        
-    uid = str(update.effective_user.id)
-    init_economy_fields(uid, update.effective_user.first_name, update.effective_user.username or "")
-    
-    info = user_info[uid]
-    buffs_str = ", ".join(info["buffs"]) if info["buffs"] else "Нет купленных баффов"
-    
-    text = (
-        f"🏦 <b>Твой игровой Профиль и Кошелёк</b>\n\n"
-        f"💵 Баланс денег: <b>{info['money']}</b>\n"
-        f"💎 Баланс камней: <b>{info['gems']}</b>\n"
-        f"👑 Активные баффы на роли: <i>{buffs_str}</i>\n\n"
-        f"Если не везёт с выпадением активной роли, то в Магазине можно купить бафф на шанс выпадения! 👇"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("🛒 Купить Бафф Мафии (300 💵)", callback_data="shop_buy_mafia")],
-        [InlineKeyboardButton("🛒 Купить Бафф Доктора (300 💵)", callback_data="shop_buy_doctor")],
-        [InlineKeyboardButton("💎 Обменять 1 камень ➔ 150 💵", callback_data="shop_exchange")]
-    ]
-    
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ── Обработчик Callback-покупок в магазине ──────────────────────────────────
-async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = str(query.from_user.id)
-    
-    if uid not in user_info: return
-    info = user_info[uid]
-    
-    if query.data == "shop_buy_mafia":
-        if info["money"] < 300:
-            await query.answer("❌ Недостаточно монет на балансе!", show_alert=True)
-            return
-        info["money"] -= 300
-        info["buffs"].append("Шанс Мафии 🔪")
-        save_data()
-        await query.answer("🎉 Бафф на Мафию успешно приобретен!", show_alert=True)
-    elif query.data == "shop_buy_doctor":
-        if info["money"] < 300:
-            await query.answer("❌ Недостаточно монет на балансе!", show_alert=True)
-            return
-        info["money"] -= 300
-        info["buffs"].append("Шанс Доктора ❤️")
-        save_data()
-        await query.answer("🎉 Бафф на Доктора успешно приобретен!", show_alert=True)
-    elif query.data == "shop_exchange":
-        if info["gems"] < 1:
-            await query.answer("❌ У вас нет драгоценных камней!", show_alert=True)
-            return
-        info["gems"] -= 1
-        info["money"] += 150
-        save_data()
-        await query.answer("✨ Успешный обмен! Получено 150 монет.", show_alert=True)
-        
-    buffs_str = ", ".join(info["buffs"]) if info["buffs"] else "Нет купленных баффов"
-    text = (
-        f"🏦 <b>Твой игровой Профиль и Кошелёк</b>\n\n"
-        f"💵 Баланс денег: <b>{info['money']}</b>\n"
-        f"💎 Баланс камней: <b>{info['gems']}</b>\n"
-        f"👑 Активные баффы на роли: <i>{buffs_str}</i>\n\n"
-        f"Если не везёт с выпадением активной роли, то в Магазине можно купить бафф на шанс выпадения! 👇"
-    )
-    keyboard = [
-        [InlineKeyboardButton("🛒 Купить Бафф Мафии (300 💵)", callback_data="shop_buy_mafia")],
-        [InlineKeyboardButton("🛒 Купить Бафф Доктора (300 💵)", callback_data="shop_buy_doctor")],
-        [InlineKeyboardButton("💎 Обменять 1 камень ➔ 150 💵", callback_data="shop_exchange")]
-    ]
-    try: await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception: pass
-
-# ── Измененный обработчик команды /start для поддержки Deep Links ─────────────
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    uid = update.effective_user.id
-    name = update.effective_user.first_name
-    
-    # Если зашли через кнопку глубокой ссылки «Присоединиться»
-    if args and args[0].startswith("join_"):
-        try: target_chat_id = int(args[0].replace("join_", ""))
-        except ValueError:
-            await update.message.reply_text("❌ Сломанная ссылка регистрации лобби.")
-            return
-            
-        if target_chat_id not in mafia_games:
-            await update.message.reply_text("❌ Сбор лобби в этой группе уже завершён или отменён.")
-            return
-            
-        game = mafia_games[target_chat_id]
-        if game["started"]:
-            await update.message.reply_text("❌ Игра в группе уже началась, вход закрыт!")
-            return
-            
-        if uid in game["players"]:
-            await update.message.reply_text("Да в игре ты уже! Слышишь? В игре! :) ❤️")
-            return
-            
-        if len(game["players"]) >= MAX_PLAYERS:
-            await update.message.reply_text("❌ В лобби закончились свободные места.")
-            return
-            
-        game["players"][uid] = name
-        init_economy_fields(str(uid), name, update.effective_user.username or "")
-        await update.message.reply_text("Ты успешно присоединился к игре! ❤️ Жди запуска создателем.")
-        
-        # Обновляем список в группе
-        await update_lobby_message(context.bot, target_chat_id)
-        return
-
-    # Обычный /start в ЛС
-    await update.message.reply_text("👋 Привет! Я многофункциональный игровой бот. Напиши команду /help, чтобы увидеть весь список моих возможностей.")
 
 # ================== СТАРЫЙ ФУНКЦИОНАЛ МОДЕРАЦИИ И ИГР ==================
 
@@ -752,46 +243,21 @@ async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
 
-# ── Перехват сообщений (Антиспам + Проверка Предсмертных записок) ──────────────
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global chat_locked
-    if not bot_enabled: return
-
+async def enforce_chat_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Блокирует любые сообщения в заглушённом чате, кроме владельца бота."""
     message = update.message
-    if not message or not message.text: return
+    if not message or message.chat.type not in ("group", "supergroup"):
+        return
+    if message.chat_id not in locked_chats:
+        return
     user = message.from_user
-    text = message.text
-    uid = str(user.id)
-
-    # Перехват предсмертной записки Мафии в ЛС
-    if message.chat.type == "private":
-        for c_id, g in mafia_games.items():
-            if g.get("last_word_user") == user.id:
-                g["last_word_user"] = None
-                mention_dead = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
-                await context.bot.send_message(
-                    chat_id=c_id,
-                    text=f"✉️ <b>[Роковое послание] {mention_dead} жестоко убит, но успел написать:</b>\n« <i>{text}</i> »",
-                    parse_mode="HTML"
-                )
-                await update.message.reply_text("✅ Ваша предсмертная записка успешно доставлена в чат группы.")
-                return
+    if user and user.id == OWNER_ID:
         return
-
-    if message.chat.type not in ("group", "supergroup"): return
-
-    if chat_locked and user.id != OWNER_ID:
-        try: await context.bot.delete_message(chat_id=message.chat_id, message_id=message.message_id)
-        except Exception: pass
-        return
-
-    init_economy_fields(uid, user.first_name, user.username or "")
-
-    if uid not in stats: stats[uid] = {"violations": 0, "name": user.first_name}
-    stats[uid]["name"] = user.first_name
-    user_info[uid]["name"] = user.first_name
-
-    mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+    try:
+        await context.bot.delete_message(chat_id=message.chat_id, message_id=message.message_id)
+    except Exception:
+        pass
+    raise ApplicationHandlerStop
 
     # Антиспам
     if text == user_last_msg[user.id]:
@@ -830,10 +296,51 @@ async def toggle_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Бот включён." if bot_enabled else "❌ Бот выключен.")
 
 async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global chat_locked
-    if update.message.from_user.id != OWNER_ID: return
-    chat_locked = not chat_locked
-    await update.message.reply_text("🔒 Чат заглушён!" if chat_locked else "🔓 Чат открыт для всех.")
+    if update.message.from_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Только владелец может использовать эту команду.")
+        return
+
+    chat_id = update.message.chat_id
+    if update.message.chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("❌ Команда работает только в группах.")
+        return
+
+    if chat_id in locked_chats:
+        locked_chats.discard(chat_id)
+        restore_permissions = saved_chat_permissions.pop(chat_id, OPEN_CHAT_PERMISSIONS)
+        try:
+            await context.bot.set_chat_permissions(chat_id=chat_id, permissions=restore_permissions)
+        except Exception as e:
+            print(f"[ОШИБКА] Открытие чата: {e}")
+        log("ЧАТ ОТКРЫТ", f"chat_id={chat_id} | владелец={update.message.from_user.first_name}")
+        await update.message.reply_text("🔓 <b>Чат открыт!</b>\nВсе участники снова могут писать.", parse_mode="HTML")
+        return
+
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        if chat.permissions:
+            saved_chat_permissions[chat_id] = chat.permissions
+    except Exception:
+        pass
+
+    locked_chats.add(chat_id)
+    try:
+        await context.bot.set_chat_permissions(chat_id=chat_id, permissions=LOCKED_CHAT_PERMISSIONS)
+    except Exception as e:
+        locked_chats.discard(chat_id)
+        print(f"[ОШИБКА] Заглушка чата: {e}")
+        await update.message.reply_text(
+            "⚠️ Не удалось заглушить чат. Дай боту права администратора с «Ограничение участников»."
+        )
+        return
+
+    log("ЧАТ ЗАКРЫТ", f"chat_id={chat_id} | владелец={update.message.from_user.first_name}")
+    await update.message.reply_text(
+        "🔒 <b>Чат заглушён!</b>\n"
+        "Участники не могут писать. Только владелец бота может отправлять сообщения.\n"
+        "Используй /lock ещё раз, чтобы открыть чат.",
+        parse_mode="HTML",
+    )
 
 async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message: return
@@ -956,10 +463,7 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📖 <b>Список всех команд:</b>\n\n"
-        "🎭 <b>Мафия:</b>\n"
-        "/mafia — Запустить сбор лобби на Мафию в группе\n"
-        "/profile — Проверить монеты, камни и купить бафф шанса ролей (в ЛС)\n\n"
+        "📖 <b>Список всех команд:</b>\n"
         "👮 <b>Админы:</b> /mute, /mute_time, /unmute, /ban, /kick, /clearwarns\n"
         "🎮 <b>Мини-игры:</b> /roll, /flip, /8ball, /rate, /casino, /duel, /anekdot, /today"
     )
@@ -967,13 +471,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Главная функция ───────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    
-    # Регистрация перехватчиков Мафии и Диплинков
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("mafia", mafia_create))
-    app.add_handler(CommandHandler("profile", cmd_profile))
-    app.add_handler(CallbackQueryHandler(mafia_buttons, pattern="^mafia_"))
-    app.add_handler(CallbackQueryHandler(shop_callback, pattern="^shop_"))
     
     # Модерация
     app.add_handler(CommandHandler("off", toggle_all))
@@ -1006,6 +503,9 @@ def main():
     app.add_handler(CommandHandler("duel", cmd_duel))
     app.add_handler(CommandHandler("anekdot", cmd_anekdot))
     app.add_handler(CommandHandler("today", cmd_today))
+
+    # Заглушка чата — перехват до всех остальных обработчиков
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS, enforce_chat_lock), group=-1)
 
     # Текстовые сообщения и вступления
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
