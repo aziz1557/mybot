@@ -499,24 +499,6 @@ async def cmd_clearwarns(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log("СБРОС НАРУШЕНИЙ", f"admin={update.message.from_user.first_name} | target={target.first_name} ({uid})")
     await update.message.reply_text(f"✅ Нарушения пользователя <b>{target.first_name}</b> сброшены.", parse_mode="HTML")
 
-async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("↩️ Ответь на сообщение чтобы пожаловаться.")
-        return
-    reporter = update.message.from_user
-    target = update.message.reply_to_message.from_user
-    reported_text = update.message.reply_to_message.text or "[медиа]"
-    log("ЖАЛОБА", f"от={reporter.first_name} | на={target.first_name} | текст={reported_text[:80]}")
-    await send_owner_log(
-        context.bot,
-        f"🚨 <b>ЖАЛОБА</b>\n"
-        f"👤 От: {reporter.first_name} (ID: <code>{reporter.id}</code>)\n"
-        f"👤 На: {target.first_name} (ID: <code>{target.id}</code>)\n"
-        f"💬 Сообщение: <i>{reported_text[:300]}</i>\n"
-        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-    await update.message.reply_text("✅ Жалоба отправлена владельцу. Спасибо!")
-
 # ── Статистика и топ ──────────────────────────────────────────────────────────
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -535,6 +517,24 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 # ── Информация о пользователе ─────────────────────────────────────────────────
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение чтобы пожаловаться.")
+        return
+    reporter = update.message.from_user
+    target = update.message.reply_to_message.from_user
+    reported_text = update.message.reply_to_message.text or "[медиа]"
+    log("ЖАЛОБА", f"от={reporter.first_name} | на={target.first_name} | текст={reported_text[:80]}")
+    await send_owner_log(
+        context.bot,
+        f"🚨 <b>ЖАЛОБА</b>\n"
+        f"👤 От: {reporter.first_name} (ID: <code>{reporter.id}</code>)\n"
+        f"👤 На: {target.first_name} (ID: <code>{target.id}</code>)\n"
+        f"💬 Сообщение: <i>{reported_text[:300]}</i>\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    await update.message.reply_text("✅ Жалоба отправлена владельцу. Спасибо!")
+    
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.message.reply_to_message.from_user if update.message.reply_to_message else update.message.from_user
     uid = str(target.id)
