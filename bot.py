@@ -47,6 +47,15 @@ user_info        = _data.get("user_info", {})
 
 user_last_msg = defaultdict(str)
 user_repeat   = defaultdict(int)
+# ================== МАФИЯ ==================
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CallbackQueryHandler
+
+mafia_games = {}
+
+MIN_PLAYERS = 4
+MAX_PLAYERS = 20
 
 # ── Логирование ───────────────────────────────────────────────────────────────
 def log(action: str, details: str = ""):
@@ -499,6 +508,8 @@ async def cmd_clearwarns(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log("СБРОС НАРУШЕНИЙ", f"admin={update.message.from_user.first_name} | target={target.first_name} ({uid})")
     await update.message.reply_text(f"✅ Нарушения пользователя <b>{target.first_name}</b> сброшены.", parse_mode="HTML")
 
+    
+
 # ── Статистика и топ ──────────────────────────────────────────────────────────
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -765,10 +776,155 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = f.readlines()
     last = "".join(lines[-30:])
     await update.message.reply_text(f"📋 <b>Последние события:</b>\n\n<pre>{last}</pre>", parse_mode="HTML")
+async def mafia_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
+    if chat_id in mafia_games:
+        await update.message.reply_text("❌ В этом чате уже идёт игра.")
+        return
+
+    mafia_games[chat_id] = {
+        "owner": update.effective_user.id,
+        "players": {
+            update.effective_user.id: update.effective_user.first_name
+        },
+        "started": False,
+        "message_id": None
+    }
+
+    keyboard = [
+        [
+            InlineKeyboardButton("➕ Присоединиться", callback_data="mafia_join"),
+            InlineKeyboardButton("➖ Выйти", callback_data="mafia_leave")
+        ],
+        [
+            InlineKeyboardButton("▶ Начать", callback_data="mafia_start")
+        ],
+        [
+            InlineKeyboardButton("❌ Отменить", callback_data="mafia_cancel")
+        ]
+    ]
+
+    text = (
+        "🎭 <b>Мафия</b>\n\n"
+        f"Игроков: 1/{MAX_PLAYERS}\n"
+        f"Минимум: {MIN_PLAYERS}\n\n"
+        "Нажмите кнопку чтобы присоединиться."
+    )
+
+    msg = await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    mafia_games[chat_id]["message_id"] = msg.message_id
+
+    async def mafia_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = query.message.chat.id
+
+    if chat_id not in mafia_games:
+        return
+
+    game = mafia_games[chat_id]
+
+    uid = query.from_user.id
+    name = query.from_user.first_name
+
+    if query.data == "mafia_join":
+
+        if uid in game["players"]:
+            return
+
+        if len(game["players"]) >= MAX_PLAYERS:
+            await query.answer("Игра заполнена.", show_alert=True)
+            return
+
+        game["players"][uid] = name
+
+    elif query.data == "mafia_leave":
+
+        if uid not in game["players"]:
+            return
+
+        del game["players"][uid]
+
+    elif query.data == "mafia_cancel":
+
+        if uid != game["owner"]:
+            await query.answer("Только создатель.", show_alert=True)
+            return
+
+        del mafia_games[chat_id]
+
+        await query.edit_message_text("❌ Игра отменена.")
+        return
+
+    elif query.data == "mafia_start":
+
+        if uid != game["owner"]:
+            await query.answer("Только создатель.", show_alert=True)
+            return
+
+        if len(game["players"]) < MIN_PLAYERS:
+            await query.answer(
+                f"Нужно минимум {MIN_PLAYERS} игрока.",
+                show_alert=True
+            )
+            return
+
+        game["started"] = True
+
+        players = "\n".join(
+            f"• {p}"
+            for p in game["players"].values()
+        )
+
+        await query.edit_message_text(
+            "🎭 Игра начинается!\n\n"
+            f"Игроков: {len(game['players'])}\n\n"
+            f"{players}\n\n"
+            "🎲 Раздаю роли...",
+            parse_mode="HTML"
+        )
+
+        return
+
+    players = "\n".join(
+        f"• {p}"
+        for p in game["players"].values()
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("➕ Присоединиться", callback_data="mafia_join"),
+            InlineKeyboardButton("➖ Выйти", callback_data="mafia_leave")
+        ],
+        [
+            InlineKeyboardButton("▶ Начать", callback_data="mafia_start")
+        ],
+        [
+            InlineKeyboardButton("❌ Отменить", callback_data="mafia_cancel")
+        ]
+    ]
+
+    await query.edit_message_text(
+        "🎭 <b>Мафия</b>\n\n"
+        f"Игроков: {len(game['players'])}/{MAX_PLAYERS}\n"
+        f"Минимум: {MIN_PLAYERS}\n\n"
+        f"{players}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
+    # Мафия
+    app.add_handler(CommandHandler("mafia", mafia_create))
+    app.add_handler(CallbackQueryHandler(mafia_buttons, pattern="^mafia_"))
     # Модерация
     app.add_handler(CommandHandler("off", toggle_all))
     app.add_handler(CommandHandler("bot", toggle_bot))
