@@ -9,7 +9,7 @@ from collections import defaultdict
 from telegram import Update, ChatPermissions
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-BOT_TOKEN = os.getenv("8422286281:AAHjGGmFtqorud4YkmjEQyqI4fQHPCeiVlM")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 5742325054
 WEATHER_API_KEY = "d7b634d924dc8c54a5b3eeeeb23a2cfc"
 bot_enabled = True        # Весь бот (команды + модерация)
