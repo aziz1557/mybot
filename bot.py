@@ -801,8 +801,6 @@ def main():
     app.add_handler(CommandHandler("casino", cmd_casino))
     app.add_handler(CommandHandler("duel", cmd_duel))
     app.add_handler(CommandHandler("anekdot", cmd_anekdot))
-    app.add_handler(CommandHandler("цитата", cmd_quote))
-    app.add_handler(CommandHandler("мем", cmd_mem))
     app.add_handler(CommandHandler("today", cmd_today))
 
     # Сообщения
