@@ -1,9 +1,9 @@
+import re import asyncio import json import os import random import aiohttp from dateti
 import re
 import asyncio
 import json
 import os
 import random
-import aiohttp
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from telegram import Update, ChatPermissions
@@ -11,7 +11,6 @@ from telegram.ext import Application, MessageHandler, CommandHandler, filters, C
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 5742325054
-WEATHER_API_KEY = "d7b634d924dc8c54a5b3eeeeb23a2cfc"
 bot_enabled = True        # Весь бот (команды + модерация)
 moderation_enabled = True # Только модерация (фильтр оскорблений)
 chat_locked = False       # Заглушка чата
@@ -239,7 +238,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_locked
     if not bot_enabled:
         return
-    
+
     message = update.message
     if not message or not message.text:
         return
@@ -732,59 +731,6 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-async def cmd_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("🌤 Укажи город: <b>/погода Москва</b>", parse_mode="HTML")
-        return
-    city = " ".join(context.args)
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    await update.message.reply_text(f"❌ Город <b>{city}</b> не найден. Проверь название.", parse_mode="HTML")
-                    return
-                data = await resp.json()
-        temp = data["main"]["temp"]
-        feels = data["main"]["feels_like"]
-        humidity = data["main"]["humidity"]
-        desc = data["weather"][0]["description"].capitalize()
-        wind = data["wind"]["speed"]
-        city_name = data["name"]
-        country = data["sys"]["country"]
-
-        # Иконка погоды
-        weather_id = data["weather"][0]["id"]
-        if weather_id < 300:
-            icon = "⛈"
-        elif weather_id < 400:
-            icon = "🌧"
-        elif weather_id < 600:
-            icon = "🌧"
-        elif weather_id < 700:
-            icon = "❄️"
-        elif weather_id < 800:
-            icon = "🌫"
-        elif weather_id == 800:
-            icon = "☀️"
-        elif weather_id < 803:
-            icon = "🌤"
-        else:
-            icon = "☁️"
-
-        await update.message.reply_text(
-            f"{icon} <b>Погода в {city_name}, {country}</b>\n\n"
-            f"🌡 Температура: <b>{temp:.1f}°C</b>\n"
-            f"🤔 Ощущается как: <b>{feels:.1f}°C</b>\n"
-            f"💧 Влажность: <b>{humidity}%</b>\n"
-            f"💨 Ветер: <b>{wind} м/с</b>\n"
-            f"📝 Описание: <b>{desc}</b>",
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        print(f"[ОШИБКА] Погода: {e}")
-        await update.message.reply_text("❌ Не удалось получить данные о погоде. Попробуй позже.")
-
 ANEKDOTS = [
     "— Доктор, я умру?\n— Обязательно. Мы все умрём.\n— Но мне страшно!\n— Ничего, я тоже боюсь.",
     "Программист зашёл в магазин. Жена попросила: «Купи хлеб, и если будут яйца — возьми десяток».\nОн купил десять батонов.",
@@ -842,8 +788,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/anekdot — случайный анекдот 😂\n"
         "/цитата — мотивирующая цитата 💡\n"
         "/мем — случайный мем 😂\n"
-        "/today — факт и дата дня 📅\n"
-        "/погода Город — текущая погода 🌤",
+        "/today — факт и дата дня 📅",
         parse_mode="HTML",
     )
 
@@ -896,7 +841,6 @@ def main():
     app.add_handler(CommandHandler("цитата", cmd_quote))
     app.add_handler(CommandHandler("мем", cmd_mem))
     app.add_handler(CommandHandler("today", cmd_today))
-    app.add_handler(CommandHandler("погода", cmd_weather))
 
     # Сообщения
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
