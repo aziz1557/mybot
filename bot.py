@@ -1,14 +1,22 @@
-import re import asyncio import json import os import random import aiohttp from dateti
 import re
 import asyncio
 import json
 import os
 import random
-from collections import defaultdict
-from telegram import Update, ChatPermissions
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+
+from telegram import Update, ChatPermissions
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters,
+)
+
+BOT_TOKEN = "8422286281:AAGcb2_M7l2Aly7XohtRE2p296hNsW0nDvQ"
 OWNER_ID = 5742325054
 bot_enabled = True        # Весь бот (команды + модерация)
 moderation_enabled = True # Только модерация (фильтр оскорблений)
