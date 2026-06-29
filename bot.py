@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import random
-from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from telegram import Update, ChatPermissions
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
