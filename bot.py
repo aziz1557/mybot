@@ -3,14 +3,17 @@ import asyncio
 import json
 import os
 import random
+import aiohttp
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from telegram import Update, ChatPermissions
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-BOT_TOKEN = "8422286281:AAFVXqsejjSBq79tvVAq-DCd4G1NjAhSnKQ"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 5742325054
+WEATHER_API_KEY = "d7b634d924dc8c54a5b3eeeeb23a2cfc"
 bot_enabled = True
+chat_locked = False  # Заглушка чата
 
 DATA_FILE = "bot_data.json"
 LOG_FILE = "bot_log.txt"
@@ -31,11 +34,10 @@ def save_data():
         }, f, ensure_ascii=False, indent=2)
 
 _data = load_data()
-stats         = _data.get("stats", {})
+stats            = _data.get("stats", {})
 total_violations = _data.get("total_violations", 0)
-user_info     = _data.get("user_info", {})
+user_info        = _data.get("user_info", {})
 
-# Антиспам (в памяти — не критично)
 user_last_msg = defaultdict(str)
 user_repeat   = defaultdict(int)
 
@@ -233,6 +235,7 @@ async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Основной обработчик сообщений ─────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global chat_locked
     if not bot_enabled:
         return
     message = update.message
@@ -245,6 +248,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = message.chat_id
     text = message.text
     uid = str(user.id)
+
+    # Заглушка чата — только владелец может писать
+    if chat_locked and user.id != OWNER_ID:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
+        except Exception:
+            pass
+        return
 
     # Обновляем инфо о пользователе
     if uid not in user_info:
@@ -263,7 +274,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
 
-    # Антиспам — одно и то же сообщение 3 раза подряд
+    # Антиспам
     if text == user_last_msg[user.id]:
         user_repeat[user.id] += 1
         if user_repeat[user.id] >= 3:
@@ -301,6 +312,28 @@ async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "✅ Бот включён — модерация активна." if bot_enabled else "❌ Бот выключен — модерация остановлена."
     log("ПЕРЕКЛЮЧЕНИЕ", f"bot_enabled={bot_enabled}")
     await update.message.reply_text(status)
+
+async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global chat_locked
+    if update.message.from_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Только владелец может использовать эту команду.")
+        return
+    chat_locked = not chat_locked
+    if chat_locked:
+        log("ЧАТ ЗАКРЫТ", f"владелец={update.message.from_user.first_name}")
+        await update.message.reply_text(
+            "🔒 <b>Чат заглушён!</b>\n"
+            "Только владелец может писать сообщения.\n"
+            "Используй /lock снова чтобы открыть чат.",
+            parse_mode="HTML",
+        )
+    else:
+        log("ЧАТ ОТКРЫТ", f"владелец={update.message.from_user.first_name}")
+        await update.message.reply_text(
+            "🔓 <b>Чат открыт!</b>\n"
+            "Все участники снова могут писать.",
+            parse_mode="HTML",
+        )
 
 async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
@@ -380,8 +413,6 @@ async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(f"👢 {target.first_name} кикнут.")
 
-
-# ── Мут на время: /mute_time 10m / 1h / 1d ───────────────────────────────────
 async def cmd_mute_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Ответь на сообщение и укажи время: /mute_time 10m | 1h | 1d")
@@ -428,6 +459,41 @@ async def cmd_mute_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
+async def cmd_clearwarns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы сбросить нарушения.")
+        return
+    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
+    if member.status not in ("administrator", "creator"):
+        return
+    target = update.message.reply_to_message.from_user
+    uid = str(target.id)
+    if uid in stats:
+        stats[uid]["violations"] = 0
+    if uid in user_info:
+        user_info[uid]["violations"] = 0
+    save_data()
+    log("СБРОС НАРУШЕНИЙ", f"admin={update.message.from_user.first_name} | target={target.first_name} ({uid})")
+    await update.message.reply_text(f"✅ Нарушения пользователя <b>{target.first_name}</b> сброшены.", parse_mode="HTML")
+
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение чтобы пожаловаться.")
+        return
+    reporter = update.message.from_user
+    target = update.message.reply_to_message.from_user
+    reported_text = update.message.reply_to_message.text or "[медиа]"
+    log("ЖАЛОБА", f"от={reporter.first_name} | на={target.first_name} | текст={reported_text[:80]}")
+    await send_owner_log(
+        context.bot,
+        f"🚨 <b>ЖАЛОБА</b>\n"
+        f"👤 От: {reporter.first_name} (ID: <code>{reporter.id}</code>)\n"
+        f"👤 На: {target.first_name} (ID: <code>{target.id}</code>)\n"
+        f"💬 Сообщение: <i>{reported_text[:300]}</i>\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    await update.message.reply_text("✅ Жалоба отправлена владельцу. Спасибо!")
+
 # ── Статистика и топ ──────────────────────────────────────────────────────────
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -470,7 +536,6 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-# ── Правила ───────────────────────────────────────────────────────────────────
 async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📋 <b>Правила группы:</b>\n\n"
@@ -483,6 +548,26 @@ async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
+async def cmd_chatinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.message.chat
+    try:
+        count = await context.bot.get_chat_member_count(chat.id)
+    except Exception:
+        count = "?"
+    chat_type = {"group": "Группа", "supergroup": "Супергруппа", "channel": "Канал"}.get(chat.type, chat.type)
+    username = f"@{chat.username}" if chat.username else "нет"
+    lock_status = "🔒 Закрыт" if chat_locked else "🔓 Открыт"
+    await update.message.reply_text(
+        f"💬 <b>Информация о чате</b>\n\n"
+        f"🔹 Название: {chat.title}\n"
+        f"🔹 Тип: {chat_type}\n"
+        f"🔹 ID: <code>{chat.id}</code>\n"
+        f"🔹 Username: {username}\n"
+        f"🔹 Участников: <b>{count}</b>\n"
+        f"🔹 Статус: {lock_status}",
+        parse_mode="HTML",
+    )
+
 # ── Активности ────────────────────────────────────────────────────────────────
 async def cmd_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = random.randint(1, 6)
@@ -491,58 +576,6 @@ async def cmd_roll(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_flip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = random.choice(["🦅 Орёл", "🪙 Решка"])
     await update.message.reply_text(f"{update.message.from_user.first_name} подбросил монету: <b>{result}</b>", parse_mode="HTML")
-
-ANEKDOTS = [
-    "— Доктор, я умру?\n— Обязательно. Мы все умрём.\n— Но мне страшно!\n— Ничего, я тоже боюсь.",
-    "Программист зашёл в магазин. Жена попросила: «Купи хлеб, и если будут яйца — возьми десяток».\nОн купил десять батонов.",
-    "— Ты умеешь хранить секреты?\n— Не знаю, мне их никогда не доверяли.",
-    "Оптимист говорит: стакан наполовину полон.\nПессимист говорит: стакан наполовину пуст.\nИнженер говорит: стакан в два раза больше, чем нужно.",
-    "— Сколько тебе лет?\n— Двадцать пять.\n— Ты так хорошо выглядишь!\n— Я знаю. Я так говорю уже десять лет.",
-    "— Почему ты опоздал на работу?\n— Я шёл по улице и увидел знак «Стоп, школа».\n— И что?\n— Я остановился и подождал, пока она закончится.",
-    "Муж звонит жене:\n— Дорогая, я выиграл в лотерею миллион! Собирай вещи!\n— Ура! Что взять, летнее или зимнее?\n— Всё равно, лишь бы к вечеру тебя дома не было.",
-    "— Вовочка, почему ты принёс в школу кота?\n— Вы сами сказали: «Не забудьте дневник, а то съем!»",
-    "Жена мужу:\n— Ты меня совсем не слушаешь!\n— Прости, что ты сказала?",
-    "— Как дела?\n— Нормально.\n— А подробнее?\n— Нормально, спасибо.",
-    "Учитель:\n— Дети, кто может привести пример нервной системы?\n— Моя мама после родительского собрания!",
-    "— Ты веришь в любовь с первого взгляда?\n— Нет, мне обычно нужно посмотреть в меню несколько раз.",
-    "Программист и его жена:\n— Сходи в магазин, купи молоко. Если будут яйца — возьми десяток.\nПрограммист вернулся с десятью пакетами молока.",
-    "— Доктор, у меня проблемы с памятью.\n— Давно это началось?\n— Что началось?",
-    "Начальник говорит сотруднику:\n— Вы опоздали на работу уже пятый раз за неделю. Что вы о себе думаете?\n— Что сегодня пятница!",
-    "— Папа, почему солнце встаёт на востоке?\n— Сынок, уже так заведено, не трогай.",
-    "Мама говорит сыну:\n— Вася, иди спать!\n— Но мама, я не хочу!\n— Иди спать, говорю! Мне с папой поговорить надо.\n— Мама, я уже сплю!",
-    "— Почему на свадьбах играет музыка?\n— Чтобы было не слышно плача родственников жениха.",
-    "— Хочешь услышать анекдот про бумагу?\n— Да.\n— Он рвётся.",
-    "Стоматолог пациенту:\n— Открывайте шире!\n— Но я уже открыл рот до упора!\n— Я говорю про кошелёк.",
-    "— Почему программисты путают Хэллоуин и Рождество?\n— Потому что 31 Oct == 25 Dec.",
-    "— Сынок, как прошёл день?\n— Нормально.\n— Что делал?\n— Ничего.\n— А вчера?\n— То же самое.\n— Вы с другом не устали делать одно и то же каждый день?\n— Мама, мы не успеваем!",
-    "— Доктор, я слышу в ушах звон.\n— Не берите трубку.",
-    "— Вы замужем?\n— Нет, просто устала.",
-    "Учитель:\n— Петя, назови мне пять животных из Африки.\n— Три льва и два слона.",
-    "— Мужик, ты чего в трёх шубах в такую жару?\n— Так в магазине написано: «Одевайтесь по сезону». Вот я и оделся по всем сезонам сразу.",
-    "— Дорогой, ты меня любишь?\n— Да.\n— Докажи!\n— Я же здесь, а не где-то ещё.",
-    "Кот залез на холодильник и смотрит вниз.\nХозяйка:\n— Что, жизнь с высоты кажется другой?\nКот:\n— Нет, просто сосиски на второй полке.",
-    "— Дети, сегодня мы будем изучать дроби. Вася, сколько будет половина от восьми?\n— Сверху — ноль, снизу — три!\n— Это как?\n— Ну, если восьмёрку разрезать поперёк...",
-    "— Алло, это скорая?\n— Да.\n— Приедете?\n— Да, а что случилось?\n— Ничего, просто спрашиваю.",
-    "Муж жене:\n— Я читал, что мужчины принимают решения быстрее женщин.\n— Это неправда!\n— Видишь, ты уже согласна.",
-    "— Вовочка, ты почему смеёшься на уроке?\n— Я не смеялся.\n— А что ты делал?\n— Улыбался изнутри.",
-    "Диетолог пациенту:\n— Вам нужно исключить жирное, жареное, сладкое и мучное.\n— А что тогда есть?\n— Вы задаёте очень правильный вопрос.",
-    "— Как называется страх перед длинными словами?\n— Гиппопотомомонстросесквиппедалиофобия.\n— Это издевательство.",
-    "Сын спрашивает отца:\n— Пап, а что такое политика?\n— Смотри: я зарабатываю деньги — значит, я капитализм. Мама распределяет — она правительство. Бабушка следит за порядком — она закон. Ты хочешь всего — ты народ. А младший братик в памперсах — будущее.\nНочью сын просыпается от плача брата, заходит к родителям — они спят.\nУтром говорит отцу:\n— Пап, я понял политику. Пока капитализм и правительство отдыхают, закон спит, народ игнорируют, а будущее лежит в дерьме.",
-    "— Доктор, у меня две проблемы: ожирение и забывчивость.\n— Давайте начнём со второй. Напомните, в чём ваша первая проблема?",
-    "Жена мужу:\n— Дорогой, я разбила твою любимую чашку.\n— Ту, что мне подарила мама?!\n— Нет, ту, которую ты привёз из Японии.\n— Уф, слава богу. Подожди... что?!",
-    "— Я такой невезучий! Вчера купил словарь, а половины слов там нет!\n— Каких слов?\n— Ну, вот например: «блиииин», «аааа», «йооо»...",
-    "Учитель:\n— Маша, твоё сочинение про кошку слово в слово совпадает с сочинением Пети!\n— Так у нас одна кошка на двоих.",
-    "— Почему ты такой грустный?\n— Вчера потерял кошелёк.\n— Много денег было?\n— Нет, но я так долго его искал...",
-    "Мужик приходит к врачу:\n— Доктор, у меня болит всё. Покажу — голова болит, нога болит, живот болит...\nВрач:\n— У вас сломан палец.",
-    "— Вы не подскажете, который час?\n— Без пятнадцати три.\n— Спасибо.\n— Пожалуйста.\n— ...Ладно, давайте познакомимся.",
-    "— Сынок, ты уроки сделал?\n— Пап, я программист. У меня нет уроков, у меня задачи.",
-    "Жена:\n— Ты меня слышишь?!\nМуж:\n— Не только слышу, но уже и вижу.",
-    "— Как вы относитесь к алкоголю?\n— С уважением. Он старше меня.",
-    "— Дорогой, у меня хорошая и плохая новость.\n— Говори хорошую.\n— Подушки безопасности работают.",
-]
-
-async def cmd_anekdot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"😂 <b>Анекдот:</b>\n\n{random.choice(ANEKDOTS)}", parse_mode="HTML")
 
 async def cmd_8ball(update: Update, context: ContextTypes.DEFAULT_TYPE):
     answers = [
@@ -588,24 +621,175 @@ async def cmd_casino(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-async def cmd_chatinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.message.chat
-    try:
-        count = await context.bot.get_chat_member_count(chat.id)
-    except Exception:
-        count = "?"
-    chat_type = {"group": "Группа", "supergroup": "Супергруппа", "channel": "Канал"}.get(chat.type, chat.type)
-    username = f"@{chat.username}" if chat.username else "нет"
+async def cmd_duel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    challenger = update.message.from_user
+    if not update.message.reply_to_message:
+        await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы вызвать на дуэль.")
+        return
+    opponent = update.message.reply_to_message.from_user
+    if opponent.id == challenger.id:
+        await update.message.reply_text("🤦 Нельзя вызвать на дуэль самого себя!")
+        return
+    if opponent.is_bot:
+        await update.message.reply_text("🤖 Нельзя вызвать на дуэль бота!")
+        return
+    winner = random.choice([challenger, opponent])
+    loser = opponent if winner.id == challenger.id else challenger
+    mention_w = f'<a href="tg://user?id={winner.id}">{winner.first_name}</a>'
+    mention_l = f'<a href="tg://user?id={loser.id}">{loser.first_name}</a>'
+    phrases = [
+        f"🔫 Дуэль! {mention_w} выстрелил первым и победил {mention_l}!",
+        f"⚔️ Дуэль! {mention_w} оказался быстрее и уложил {mention_l}!",
+        f"🏆 Дуэль завершена! {mention_w} одержал победу над {mention_l}!",
+        f"💥 {mention_l} даже не успел достать оружие — {mention_w} уже победил!",
+        f"🎯 Меткий выстрел! {mention_w} побеждает {mention_l}!",
+    ]
+    await update.message.reply_text(random.choice(phrases), parse_mode="HTML")
+
+QUOTES = [
+    "💡 «Успех — это не конец, неудача — не смерть. Важна лишь смелость продолжать.» — У. Черчилль",
+    "💡 «Единственный способ делать великую работу — любить то, что делаешь.» — С. Джобс",
+    "💡 «Жизнь — это то, что происходит, пока ты строишь другие планы.» — Дж. Леннон",
+    "💡 «Будь изменением, которое хочешь видеть в мире.» — М. Ганди",
+    "💡 «Всё, что вы можете себе представить — реально.» — П. Пикассо",
+    "💡 «Мечтай масштабно. Начинай с малого. Действуй сейчас.» — Р. Бренсон",
+    "💡 «Твой самый недовольный клиент — твой лучший источник знаний.» — Б. Гейтс",
+    "💡 «Успех — плохой учитель. Он соблазняет умных людей думать, что они не могут проиграть.» — Б. Гейтс",
+    "💡 «В середине каждой трудности лежит возможность.» — А. Эйнштейн",
+    "💡 «Человек, который никогда не ошибался, никогда не пробовал ничего нового.» — А. Эйнштейн",
+    "💡 «Будущее принадлежит тем, кто верит в красоту своих мечтаний.» — Э. Рузвельт",
+    "💡 «Не важно, как медленно ты идёшь, главное — не останавливаться.» — Конфуций",
+    "💡 «Падай семь раз — вставай восемь.» — Японская пословица",
+    "💡 «Жизнь измеряется не количеством вдохов, а моментами, которые захватывают дух.» — М. Анджелоу",
+    "💡 «Если ты хочешь идти быстро — иди один. Если хочешь идти далеко — идите вместе.» — Африканская пословица",
+]
+
+MEMES = [
+    "😂 Когда починил баг в 3 ночи и сам не понимаешь как:\n*танцует в темноте*",
+    "😂 Понедельник: я буду продуктивным всю неделю!\nПятница: *смотрит в потолок уже 4 часа*",
+    "😂 Я: посплю 5 минут\nЯ через 3 часа: кто я? где я? какой год?",
+    "😂 Программист открывает холодильник:\n— Null pointer exception: еда не найдена",
+    "😂 Когда написал 200 строк кода и забыл сохранить:\n*стадии принятия горя*",
+    "😂 Мозг в 2 часа ночи: а помнишь как ты облажался в 2015 году?",
+    "😂 Я в магазине: возьму только хлеб\nЯ на кассе: *2 пакета вещей, которых не планировал*",
+    "😂 Кот в 3 ночи: БЕГИ\nКот в 3 дня: не трогай меня, я сплю",
+    "😂 Диета: день 1 — начинается!\nДиета: день 1 вечер — уже закончилась",
+    "😂 Когда говоришь 'я скоро' и проходит 3 часа:\n*время — иллюзия*",
+    "😂 Wi-Fi у соседей сильнее чем моя воля к жизни",
+    "😂 Встреча в 9 утра:\nОрганизатор: все бодрые?\nВсе: *зомби с кофе*",
+    "😂 Я: завтра точно встану в 7!\nЯ в 7: отложить на 5 минут × 6 = проснулся в 10",
+    "😂 Когда читаешь старый код и не понимаешь, кто это написал...\n*смотришь на дату* — это был я",
+    "😂 Телефон: 1% заряда\nЯ: *пробегаю марафон до розетки*",
+]
+
+async def cmd_quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(random.choice(QUOTES), parse_mode="HTML")
+
+async def cmd_mem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(random.choice(MEMES))
+
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now()
+    days_ru = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня",
+                 "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+    day_name = days_ru[now.weekday()]
+    date_str = f"{now.day} {months_ru[now.month - 1]} {now.year}"
+    time_str = now.strftime("%H:%M")
+    facts = [
+        "🌍 Каждый день на Земле происходит около 100 молний в секунду.",
+        "🧠 Мозг человека содержит около 86 миллиардов нейронов.",
+        "🐝 Пчела посещает около 2000 цветов в день.",
+        "🌊 Тихий океан больше всех континентов вместе взятых.",
+        "🦋 Бабочки ощущают вкус ногами.",
+        "🎵 Музыка активирует те же зоны мозга, что и еда и секс.",
+        "🐬 Дельфины спят с одним открытым глазом.",
+        "🍯 Мёд никогда не портится — его находили в египетских пирамидах.",
+        "🌙 На Луне нет ветра, поэтому следы астронавтов сохранятся миллионы лет.",
+        "🐙 У осьминога три сердца и голубая кровь.",
+    ]
     await update.message.reply_text(
-        f"💬 <b>Информация о чате</b>\n\n"
-        f"🔹 Название: {chat.title}\n"
-        f"🔹 Тип: {chat_type}\n"
-        f"🔹 ID: <code>{chat.id}</code>\n"
-        f"🔹 Username: {username}\n"
-        f"🔹 Участников: <b>{count}</b>",
+        f"📅 <b>Сегодня:</b> {day_name}, {date_str}\n"
+        f"🕐 <b>Время:</b> {time_str}\n\n"
+        f"<b>Факт дня:</b> {random.choice(facts)}",
         parse_mode="HTML",
     )
 
+async def cmd_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("🌤 Укажи город: <b>/погода Москва</b>", parse_mode="HTML")
+        return
+    city = " ".join(context.args)
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await update.message.reply_text(f"❌ Город <b>{city}</b> не найден. Проверь название.", parse_mode="HTML")
+                    return
+                data = await resp.json()
+        temp = data["main"]["temp"]
+        feels = data["main"]["feels_like"]
+        humidity = data["main"]["humidity"]
+        desc = data["weather"][0]["description"].capitalize()
+        wind = data["wind"]["speed"]
+        city_name = data["name"]
+        country = data["sys"]["country"]
+
+        # Иконка погоды
+        weather_id = data["weather"][0]["id"]
+        if weather_id < 300:
+            icon = "⛈"
+        elif weather_id < 400:
+            icon = "🌧"
+        elif weather_id < 600:
+            icon = "🌧"
+        elif weather_id < 700:
+            icon = "❄️"
+        elif weather_id < 800:
+            icon = "🌫"
+        elif weather_id == 800:
+            icon = "☀️"
+        elif weather_id < 803:
+            icon = "🌤"
+        else:
+            icon = "☁️"
+
+        await update.message.reply_text(
+            f"{icon} <b>Погода в {city_name}, {country}</b>\n\n"
+            f"🌡 Температура: <b>{temp:.1f}°C</b>\n"
+            f"🤔 Ощущается как: <b>{feels:.1f}°C</b>\n"
+            f"💧 Влажность: <b>{humidity}%</b>\n"
+            f"💨 Ветер: <b>{wind} м/с</b>\n"
+            f"📝 Описание: <b>{desc}</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        print(f"[ОШИБКА] Погода: {e}")
+        await update.message.reply_text("❌ Не удалось получить данные о погоде. Попробуй позже.")
+
+ANEKDOTS = [
+    "— Доктор, я умру?\n— Обязательно. Мы все умрём.\n— Но мне страшно!\n— Ничего, я тоже боюсь.",
+    "Программист зашёл в магазин. Жена попросила: «Купи хлеб, и если будут яйца — возьми десяток».\nОн купил десять батонов.",
+    "— Ты умеешь хранить секреты?\n— Не знаю, мне их никогда не доверяли.",
+    "Оптимист говорит: стакан наполовину полон.\nПессимист говорит: стакан наполовину пуст.\nИнженер говорит: стакан в два раза больше, чем нужно.",
+    "— Сколько тебе лет?\n— Двадцать пять.\n— Ты так хорошо выглядишь!\n— Я знаю. Я так говорю уже десять лет.",
+    "— Почему ты опоздал на работу?\n— Я шёл по улице и увидел знак «Стоп, школа».\n— И что?\n— Я остановился и подождал, пока она закончится.",
+    "Муж звонит жене:\n— Дорогая, я выиграл в лотерею миллион! Собирай вещи!\n— Ура! Что взять, летнее или зимнее?\n— Всё равно, лишь бы к вечеру тебя дома не было.",
+    "— Вовочка, почему ты принёс в школу кота?\n— Вы сами сказали: «Не забудьте дневник, а то съем!»",
+    "Жена мужу:\n— Ты меня совсем не слушаешь!\n— Прости, что ты сказала?",
+    "— Доктор, у меня проблемы с памятью.\n— Давно это началось?\n— Что началось?",
+    "Начальник говорит сотруднику:\n— Вы опоздали на работу уже пятый раз за неделю. Что вы о себе думаете?\n— Что сегодня пятница!",
+    "— Почему на свадьбах играет музыка?\n— Чтобы было не слышно плача родственников жениха.",
+    "— Доктор, я слышу в ушах звон.\n— Не берите трубку.",
+    "Стоматолог пациенту:\n— Открывайте шире!\n— Но я уже открыл рот до упора!\n— Я говорю про кошелёк.",
+    "— Почему программисты путают Хэллоуин и Рождество?\n— Потому что 31 Oct == 25 Dec.",
+]
+
+async def cmd_anekdot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"😂 <b>Анекдот:</b>\n\n{random.choice(ANEKDOTS)}", parse_mode="HTML")
+
+# ── Помощь ────────────────────────────────────────────────────────────────────
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 <b>Список всех команд:</b>\n\n"
@@ -615,11 +799,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/unmute — размутить пользователя\n"
         "/ban — забанить пользователя\n"
         "/kick — кикнуть пользователя\n"
+        "/clearwarns — сбросить нарушения\n"
+        "/report — пожаловаться владельцу\n"
         "/bot — включить/выключить модерацию\n\n"
+        "🔒 <b>Только владелец:</b>\n"
+        "/lock — заглушить/открыть весь чат\n"
+        "/logs — последние 30 событий\n\n"
         "📊 <b>Статистика:</b>\n"
         "/stats — всего нарушений\n"
-        "/top — топ нарушителей\n"
-        "/logs — последние события (владелец)\n\n"
+        "/top — топ нарушителей\n\n"
         "ℹ️ <b>Информация:</b>\n"
         "/info — инфо о пользователе\n"
         "/id — твой Telegram ID\n"
@@ -631,11 +819,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/8ball вопрос — шар предсказаний 🎱\n"
         "/rate — оценить пользователя ⭐\n"
         "/casino — однорукий бандит 🎰\n"
-        "/anekdot — случайный анекдот 😂",
+        "/duel — дуэль с пользователем ⚔️\n"
+        "/anekdot — случайный анекдот 😂\n"
+        "/цитата — мотивирующая цитата 💡\n"
+        "/мем — случайный мем 😂\n"
+        "/today — факт и дата дня 📅\n"
+        "/погода Город — текущая погода 🌤",
         parse_mode="HTML",
     )
 
-# ── Просмотр логов (только владелец) ─────────────────────────────────────────
 async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != OWNER_ID:
         return
@@ -652,11 +844,14 @@ def main():
 
     # Модерация
     app.add_handler(CommandHandler("bot", toggle_bot))
+    app.add_handler(CommandHandler("lock", cmd_lock))
     app.add_handler(CommandHandler("mute", cmd_mute))
     app.add_handler(CommandHandler("mute_time", cmd_mute_time))
     app.add_handler(CommandHandler("unmute", cmd_unmute))
     app.add_handler(CommandHandler("ban", cmd_ban))
     app.add_handler(CommandHandler("kick", cmd_kick))
+    app.add_handler(CommandHandler("clearwarns", cmd_clearwarns))
+    app.add_handler(CommandHandler("report", cmd_report))
 
     # Статистика
     app.add_handler(CommandHandler("stats", cmd_stats))
@@ -676,7 +871,12 @@ def main():
     app.add_handler(CommandHandler("8ball", cmd_8ball))
     app.add_handler(CommandHandler("rate", cmd_rate))
     app.add_handler(CommandHandler("casino", cmd_casino))
+    app.add_handler(CommandHandler("duel", cmd_duel))
     app.add_handler(CommandHandler("anekdot", cmd_anekdot))
+    app.add_handler(CommandHandler("цитата", cmd_quote))
+    app.add_handler(CommandHandler("мем", cmd_mem))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("погода", cmd_weather))
 
     # Сообщения
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
