@@ -53,6 +53,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
 
 mafia_games = {}
+import random
+
+ROLES = {
+    "mafia": "🔪 Мафия",
+    "doctor": "❤️ Доктор",
+    "civilian": "👤 Мирный житель",
+}
 
 MIN_PLAYERS = 4
 MAX_PLAYERS = 20
@@ -919,7 +926,75 @@ async def mafia_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+async def mafia_send_roles(context, chat_id):
+    game = mafia_games[chat_id]
 
+    players = list(game["players"].items())
+    random.shuffle(players)
+
+    count = len(players)
+
+    if count <= 5:
+        mafia_count = 1
+    elif count <= 8:
+        mafia_count = 2
+    else:
+        mafia_count = 3
+
+    roles = []
+
+    for _ in range(mafia_count):
+        roles.append("mafia")
+
+    roles.append("doctor")
+
+    while len(roles) < count:
+        roles.append("civilian")
+
+    random.shuffle(roles)
+
+    game["roles"] = {}
+
+    for (uid, name), role in zip(players, roles):
+        game["roles"][uid] = role
+
+        try:
+            if role == "mafia":
+                text = (
+                    "🔪 <b>Ты Мафия</b>\n\n"
+                    "Ночью ты будешь выбирать жертву."
+                )
+
+            elif role == "doctor":
+                text = (
+                    "❤️ <b>Ты Доктор</b>\n\n"
+                    "Каждую ночь ты выбираешь кого лечить."
+                )
+
+            else:
+                text = (
+                    "👤 <b>Ты Мирный житель</b>\n\n"
+                    "Найди и выгони всю мафию."
+                )
+
+            await context.bot.send_message(
+                uid,
+                text,
+                parse_mode="HTML"
+            )
+
+        except Exception:
+
+            await context.bot.send_message(
+                chat_id,
+                f"❌ {name} не написал боту в личные сообщения.\n"
+                "Пусть откроет чат с ботом и нажмёт /start."
+            )
+
+            del mafia_games[chat_id]
+            return False
+
+    return True
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     # Мафия
