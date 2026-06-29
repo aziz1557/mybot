@@ -9,9 +9,9 @@ from collections import defaultdict
 from telegram import Update, ChatPermissions
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("8422286281:AAGrsdeRwQPZkMugh9Zubm6St0aR7lrgAo4")
 OWNER_ID = 5742325054
-WEATHER_API_KEY = "8422286281:AAGrsdeRwQPZkMugh9Zubm6St0aR7lrgAo4"
+WEATHER_API_KEY = "d7b634d924dc8c54a5b3eeeeb23a2cfc"
 bot_enabled = True        # Весь бот (команды + модерация)
 moderation_enabled = True # Только модерация (фильтр оскорблений)
 chat_locked = False       # Заглушка чата
