@@ -11,9 +11,10 @@ from telegram.ext import Application, MessageHandler, CommandHandler, filters, C
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 5742325054
-WEATHER_API_KEY = "d7b634d924dc8c54a5b3eeeeb23a2cfc"
-bot_enabled = True
-chat_locked = False  # Заглушка чата
+WEATHER_API_KEY = "8422286281:AAGrsdeRwQPZkMugh9Zubm6St0aR7lrgAo4"
+bot_enabled = True        # Весь бот (команды + модерация)
+moderation_enabled = True # Только модерация (фильтр оскорблений)
+chat_locked = False       # Заглушка чата
 
 DATA_FILE = "bot_data.json"
 LOG_FILE = "bot_log.txt"
@@ -238,6 +239,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_locked
     if not bot_enabled:
         return
+    
     message = update.message
     if not message or not message.text:
         return
@@ -291,7 +293,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_last_msg[user.id] = text
 
     # Фильтр оскорблений
-    if not contains_insult(text):
+    if not moderation_enabled or not contains_insult(text):
         return
 
     try:
@@ -305,13 +307,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Команды модерации ─────────────────────────────────────────────────────────
 async def toggle_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global moderation_enabled
+    if update.message.from_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Только владелец может использовать эту команду.")
+        return
+    moderation_enabled = not moderation_enabled
+    status = "✅ Модерация включена — фильтр оскорблений активен." if moderation_enabled else "❌ Модерация выключена — фильтр оскорблений остановлен."
+    log("МОДЕРАЦИЯ", f"moderation_enabled={moderation_enabled}")
+    await update.message.reply_text(status)
+
+async def toggle_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_enabled
     if update.message.from_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Только владелец может использовать эту команду.")
         return
     bot_enabled = not bot_enabled
-    status = "✅ Бот включён — модерация активна." if bot_enabled else "❌ Бот выключен — модерация остановлена."
-    log("ПЕРЕКЛЮЧЕНИЕ", f"bot_enabled={bot_enabled}")
-    await update.message.reply_text(status)
+    status = (
+        "✅ <b>Бот полностью включён</b> — все команды и модерация активны."
+        if bot_enabled else
+        "❌ <b>Бот полностью выключен</b> — не реагирует ни на что."
+    )
+    log("БОТ", f"bot_enabled={bot_enabled}")
+    await update.message.reply_text(status, parse_mode="HTML")
 
 async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_locked
@@ -803,6 +820,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/report — пожаловаться владельцу\n"
         "/bot — включить/выключить модерацию\n\n"
         "🔒 <b>Только владелец:</b>\n"
+        "/off — выключить/включить весь бот\n"
+        "/bot — выключить/включить модерацию\n"
         "/lock — заглушить/открыть весь чат\n"
         "/logs — последние 30 событий\n\n"
         "📊 <b>Статистика:</b>\n"
@@ -843,6 +862,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Модерация
+    app.add_handler(CommandHandler("off", toggle_all))
     app.add_handler(CommandHandler("bot", toggle_bot))
     app.add_handler(CommandHandler("lock", cmd_lock))
     app.add_handler(CommandHandler("mute", cmd_mute))
