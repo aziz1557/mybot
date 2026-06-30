@@ -831,9 +831,34 @@ async def toggle_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global chat_locked
-    if update.message.from_user.id != OWNER_ID: return
+
+    if update.message.from_user.id != OWNER_ID:
+        return
+
     chat_locked = not chat_locked
-    await update.message.reply_text("🔒 Чат заглушён!" if chat_locked else "🔓 Чат открыт для всех.")
+
+    try:
+        if chat_locked:
+            await context.bot.set_chat_permissions(
+                chat_id=update.effective_chat.id,
+                permissions=ChatPermissions(
+                    can_send_messages=False
+                )
+            )
+            await update.message.reply_text("🔒 Чат полностью закрыт. Никто не может писать.")
+        else:
+            await context.bot.set_chat_permissions(
+                chat_id=update.effective_chat.id,
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True
+                )
+            )
+            await update.message.reply_text("🔓 Чат открыт.")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
 
 async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message: return
