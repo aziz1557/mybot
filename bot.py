@@ -8,7 +8,7 @@ from collections import defaultdict
 from telegram import Update, ChatPermissions
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-BOT_TOKEN = "8422286281:AAFDqQ1xhPem2Bpc4D_b0I6aRF7zH0C1dFo"
+BOT_TOKEN = "8422286281:AAFgStDEkAuf7N83vpWIuOwmcF9htNeYUK0"
 OWNER_ID = 5742325054
 bot_enabled = True
 
