@@ -8,7 +8,9 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from telegram import Update, ChatPermissions
 from telegram.error import TelegramError
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
+
+import mafia
 
 # ── Токен теперь берётся из переменной окружения, а не хранится в коде ──────
 # Перед запуском: export BOT_TOKEN="твой_новый_токен"  (Linux/Mac)
@@ -721,7 +723,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/8ball вопрос — шар предсказаний 🎱\n"
         "/rate — оценить пользователя ⭐\n"
         "/casino — однорукий бандит 🎰\n"
-        "/anekdot — случайный анекдот 😂",
+        "/anekdot — случайный анекдот 😂\n\n"
+        "🎭 <b>Мафия:</b>\n"
+        "/mafia — открыть набор в игру\n"
+        "/startmafia — начать игру (админ)\n"
+        "/stopmafia — остановить игру (админ)",
         parse_mode="HTML",
     )
 
@@ -776,6 +782,12 @@ def main():
     app.add_handler(CommandHandler("rate", cmd_rate))
     app.add_handler(CommandHandler("casino", cmd_casino))
     app.add_handler(CommandHandler("anekdot", cmd_anekdot))
+
+    # Игра "Мафия"
+    app.add_handler(CommandHandler("mafia", mafia.cmd_mafia))
+    app.add_handler(CommandHandler("startmafia", mafia.cmd_startmafia))
+    app.add_handler(CommandHandler("stopmafia", mafia.cmd_stopmafia))
+    app.add_handler(CallbackQueryHandler(mafia.callback_router))
 
     # Сообщения
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
