@@ -3,56 +3,92 @@ import asyncio
 import json
 import os
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from telegram import Update, ChatPermissions
+from telegram.error import TelegramError
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-BOT_TOKEN = "8422286281:AAHz9p0aAtI2TMgmEO_ab2edTcOT_EJFsOY"
+# ── Токен теперь берётся из переменной окружения, а не хранится в коде ──────
+# Перед запуском: export BOT_TOKEN="твой_новый_токен"  (Linux/Mac)
+#                 set BOT_TOKEN=твой_новый_токен        (Windows cmd)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "Не найден токен бота! Задай переменную окружения BOT_TOKEN "
+        "(например: export BOT_TOKEN='123:ABC') и перезапусти скрипт."
+    )
+
 OWNER_ID = 5742325054
 bot_enabled = True
 
 DATA_FILE = "bot_data.json"
 LOG_FILE = "bot_log.txt"
+MAX_LOG_SIZE = 5 * 1024 * 1024  # 5 МБ — при превышении лог обрезается
+
+MUTE_SECONDS = 15  # единая точка правды: сколько реально длится короткий мут
+SPAM_WINDOW_SECONDS = 3600  # повтор одного и того же сообщения считается спамом только в пределах часа
 
 # ── Загрузка / сохранение данных ──────────────────────────────────────────────
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[ОШИБКА] Не удалось прочитать {DATA_FILE}: {e}. Использую пустые данные.")
     return {"stats": {}, "total_violations": 0, "user_info": {}}
 
 def save_data():
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump({
-            "stats": stats,
-            "total_violations": total_violations,
-            "user_info": user_info,
-        }, f, ensure_ascii=False, indent=2)
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "stats": stats,
+                "total_violations": total_violations,
+                "user_info": user_info,
+            }, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print(f"[ОШИБКА] Не удалось сохранить {DATA_FILE}: {e}")
 
 _data = load_data()
 stats         = _data.get("stats", {})
 total_violations = _data.get("total_violations", 0)
 user_info     = _data.get("user_info", {})
 
-# Антиспам (в памяти — не критично)
-user_last_msg = defaultdict(str)
+# Антиспам (в памяти — не критично). Храним (текст, время последнего сообщения)
+user_last_msg = defaultdict(lambda: ("", 0.0))
 user_repeat   = defaultdict(int)
 
 # ── Логирование ───────────────────────────────────────────────────────────────
+def _rotate_log_if_needed():
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > MAX_LOG_SIZE:
+            # оставляем только последние 2000 строк, чтобы файл не рос бесконечно
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            with open(LOG_FILE, "w", encoding="utf-8") as f:
+                f.writelines(lines[-2000:])
+    except OSError as e:
+        print(f"[ОШИБКА] Ротация лога: {e}")
+
 def log(action: str, details: str = ""):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {action}"
     if details:
         line += f" | {details}"
     print(line)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    try:
+        _rotate_log_if_needed()
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        print(f"[ОШИБКА] Запись лога: {e}")
 
 async def send_owner_log(bot, text: str):
     try:
         await bot.send_message(chat_id=OWNER_ID, text=text, parse_mode="HTML")
-    except Exception as e:
+    except TelegramError as e:
         print(f"[ОШИБКА] Лог владельцу: {e}")
 
 # ── Паттерны оскорблений ──────────────────────────────────────────────────────
@@ -133,9 +169,18 @@ def contains_insult(text):
             return True
     return False
 
+# ── Проверка прав администратора (общая функция, чтобы не дублировать код) ───
+async def is_admin(context, chat_id, user_id) -> bool:
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except TelegramError as e:
+        print(f"[ОШИБКА] Проверка прав администратора: {e}")
+        return False
+
 # ── Снятие мута ───────────────────────────────────────────────────────────────
 async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
-    await asyncio.sleep(15)
+    await asyncio.sleep(MUTE_SECONDS)
     try:
         await bot.restrict_chat_member(
             chat_id=chat_id, user_id=user_id,
@@ -144,12 +189,12 @@ async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
                 can_send_other_messages=True, can_add_web_page_previews=True,
             ),
         )
-    except Exception as e:
+    except TelegramError as e:
         print(f"[ОШИБКА] Снятие мута: {e}")
         return
     try:
         await bot.delete_message(chat_id=chat_id, message_id=mute_msg_id)
-    except Exception:
+    except TelegramError:
         pass
     try:
         await bot.send_message(
@@ -157,13 +202,13 @@ async def unmute_user(bot, chat_id, user_id, mention, mute_msg_id):
             text=f"🔊 {mention} — мут снят, можешь снова писать.\n⚠️ Следи за словами!",
             parse_mode="HTML",
         )
-    except Exception as e:
+    except TelegramError as e:
         print(f"[ОШИБКА] Сообщение о снятии мута: {e}")
 
 # ── Выдача мута ───────────────────────────────────────────────────────────────
 async def do_mute(context, chat_id, user_id, mention, reason="оскорбление", deleted_text=""):
     global total_violations
-    mute_until = datetime.now(timezone.utc) + timedelta(seconds=20)
+    mute_until = datetime.now(timezone.utc) + timedelta(seconds=MUTE_SECONDS)
     try:
         await context.bot.restrict_chat_member(
             chat_id=chat_id, user_id=user_id,
@@ -173,8 +218,21 @@ async def do_mute(context, chat_id, user_id, mention, reason="оскорблен
             ),
             until_date=mute_until,
         )
-    except Exception as e:
+    except TelegramError as e:
+        # Реальный мут не сработал (например, цель — админ или у бота нет прав).
+        # Больше не притворяемся, что всё получилось: сообщаем и не пишем статистику.
         print(f"[ОШИБКА] Мут: {e}")
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Не удалось замутить {mention}: возможно, у бота недостаточно прав "
+                     f"или это администратор группы.",
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
+        log("ОШИБКА МУТА", f"user_id={user_id} | причина={reason} | ошибка={e}")
+        return
 
     total_violations += 1
     uid = str(user_id)
@@ -200,50 +258,57 @@ async def do_mute(context, chat_id, user_id, mention, reason="оскорблен
         mute_msg = await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"🔇 {mention} получил мут на <b>15 секунд</b> за {reason}.\n"
+                f"🔇 {mention} получил мут на <b>{MUTE_SECONDS} секунд</b> за {reason}.\n"
                 f"❌ Сообщение удалено.\n"
-                f"⏳ Писать снова можно будет через <b>15 секунд</b>."
+                f"⏳ Писать снова можно будет через <b>{MUTE_SECONDS} секунд</b>."
             ),
             parse_mode="HTML",
         )
         asyncio.ensure_future(unmute_user(context.bot, chat_id, user_id, mention, mute_msg.message_id))
-    except Exception as e:
+    except TelegramError as e:
         print(f"[ОШИБКА] Сообщение о муте: {e}")
 
 # ── Приветствие новых участников ──────────────────────────────────────────────
 async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for member in update.message.new_chat_members:
         uid = str(member.id)
-        if uid not in user_info:
-            user_info[uid] = {
-                "name": member.first_name,
-                "username": member.username or "",
-                "joined": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "violations": 0,
-            }
-            save_data()
+        # Обновляем дату вступления и при повторном входе тоже, а не только при первом
+        user_info[uid] = {
+            "name": member.first_name,
+            "username": member.username or "",
+            "joined": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "violations": user_info.get(uid, {}).get("violations", 0),
+        }
+        save_data()
         log("ВСТУПЛЕНИЕ", f"user={member.first_name} ({uid})")
         mention = f'<a href="tg://user?id={member.id}">{member.first_name}</a>'
-        await update.message.reply_text(
-            f"👋 Привет, {mention}! Добро пожаловать в группу!\n"
-            f"📋 Маты разрешены, оскорбления — нет.\n"
-            f"📌 Напиши /rules чтобы узнать правила.",
-            parse_mode="HTML",
-        )
+        try:
+            await update.message.reply_text(
+                f"👋 Привет, {mention}! Добро пожаловать в группу!\n"
+                f"📋 Маты разрешены, оскорбления — нет.\n"
+                f"📌 Напиши /rules чтобы узнать правила.",
+                parse_mode="HTML",
+            )
+        except TelegramError as e:
+            print(f"[ОШИБКА] Приветствие: {e}")
 
 # ── Основной обработчик сообщений ─────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_enabled:
         return
     message = update.message
-    if not message or not message.text:
+    if not message:
+        return
+    # Проверяем и обычный текст, и подпись к фото/видео/документам — раньше
+    # оскорбления в подписи к медиа полностью проходили мимо фильтра.
+    text = message.text or message.caption
+    if not text:
         return
     if message.chat.type not in ("group", "supergroup"):
         return
 
     user = message.from_user
     chat_id = message.chat_id
-    text = message.text
     uid = str(user.id)
 
     # Обновляем инфо о пользователе
@@ -263,21 +328,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
 
-    # Антиспам — одно и то же сообщение 3 раза подряд
-    if text == user_last_msg[user.id]:
+    # Антиспам — одно и то же сообщение 3 раза подряд, но только в пределах SPAM_WINDOW_SECONDS,
+    # иначе одинаковое сообщение через месяц засчитывалось бы как повтор.
+    now = time.monotonic()
+    last_text, last_time = user_last_msg[user.id]
+    if text == last_text and (now - last_time) <= SPAM_WINDOW_SECONDS:
         user_repeat[user.id] += 1
+        user_last_msg[user.id] = (text, now)
         if user_repeat[user.id] >= 3:
             user_repeat[user.id] = 0
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
-            except Exception:
+            except TelegramError:
                 pass
             log("СПАМ", f"user={user.first_name} ({uid}) | текст={text[:60]}")
             await do_mute(context, chat_id, user.id, mention, "спам", text)
             return
     else:
         user_repeat[user.id] = 0
-        user_last_msg[user.id] = text
+        user_last_msg[user.id] = (text, now)
 
     # Фильтр оскорблений
     if not contains_insult(text):
@@ -285,7 +354,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
-    except Exception as e:
+    except TelegramError as e:
         print(f"[ОШИБКА] Удаление: {e}")
         return
 
@@ -306,8 +375,7 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы замутить.")
         return
-    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
-    if member.status not in ("administrator", "creator"):
+    if not await is_admin(context, update.message.chat_id, update.message.from_user.id):
         return
     target = update.message.reply_to_message.from_user
     mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
@@ -325,17 +393,20 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы размутить.")
         return
-    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
-    if member.status not in ("administrator", "creator"):
+    if not await is_admin(context, update.message.chat_id, update.message.from_user.id):
         return
     target = update.message.reply_to_message.from_user
-    await context.bot.restrict_chat_member(
-        chat_id=update.message.chat_id, user_id=target.id,
-        permissions=ChatPermissions(
-            can_send_messages=True, can_send_polls=True,
-            can_send_other_messages=True, can_add_web_page_previews=True,
-        ),
-    )
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=update.message.chat_id, user_id=target.id,
+            permissions=ChatPermissions(
+                can_send_messages=True, can_send_polls=True,
+                can_send_other_messages=True, can_add_web_page_previews=True,
+            ),
+        )
+    except TelegramError as e:
+        await update.message.reply_text(f"⚠️ Не удалось размутить {target.first_name}: {e}")
+        return
     log("РАЗМУТ (АДМИН)", f"admin={update.message.from_user.first_name} | target={target.first_name} ({target.id})")
     await update.message.reply_text(f"🔊 {target.first_name} размучен.")
 
@@ -343,12 +414,15 @@ async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы забанить.")
         return
-    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
-    if member.status not in ("administrator", "creator"):
+    if not await is_admin(context, update.message.chat_id, update.message.from_user.id):
         return
     target = update.message.reply_to_message.from_user
     mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
-    await context.bot.ban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+    try:
+        await context.bot.ban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+    except TelegramError as e:
+        await update.message.reply_text(f"⚠️ Не удалось забанить {target.first_name}: {e}")
+        return
     log("БАН (АДМИН)", f"admin={update.message.from_user.first_name} | target={target.first_name} ({target.id})")
     await send_owner_log(
         context.bot,
@@ -363,13 +437,16 @@ async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Ответь на сообщение пользователя чтобы кикнуть.")
         return
-    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
-    if member.status not in ("administrator", "creator"):
+    if not await is_admin(context, update.message.chat_id, update.message.from_user.id):
         return
     target = update.message.reply_to_message.from_user
     mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
-    await context.bot.ban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
-    await context.bot.unban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+    try:
+        await context.bot.ban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+        await context.bot.unban_chat_member(chat_id=update.message.chat_id, user_id=target.id)
+    except TelegramError as e:
+        await update.message.reply_text(f"⚠️ Не удалось кикнуть {target.first_name}: {e}")
+        return
     log("КИК (АДМИН)", f"admin={update.message.from_user.first_name} | target={target.first_name} ({target.id})")
     await send_owner_log(
         context.bot,
@@ -386,34 +463,47 @@ async def cmd_mute_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ Ответь на сообщение и укажи время: /mute_time 10m | 1h | 1d")
         return
-    member = await context.bot.get_chat_member(update.message.chat_id, update.message.from_user.id)
-    if member.status not in ("administrator", "creator"):
+    if not await is_admin(context, update.message.chat_id, update.message.from_user.id):
         return
     args = context.args
     if not args:
         await update.message.reply_text("⏱ Укажи время: /mute_time 10m | 1h | 1d")
         return
+
     raw = args[0].lower()
-    if raw.endswith("m"):
-        delta = timedelta(minutes=int(raw[:-1]))
-        label = f"{raw[:-1]} минут"
-    elif raw.endswith("h"):
-        delta = timedelta(hours=int(raw[:-1]))
-        label = f"{raw[:-1]} часов"
-    elif raw.endswith("d"):
-        delta = timedelta(days=int(raw[:-1]))
-        label = f"{raw[:-1]} дней"
-    else:
-        await update.message.reply_text("❌ Формат: 10m, 1h, 2d")
+    units = {"m": ("minutes", "минут"), "h": ("hours", "часов"), "d": ("days", "дней")}
+    unit_char = raw[-1] if raw else ""
+    number_part = raw[:-1]
+
+    # Раньше int(raw[:-1]) при неверном вводе ("abc", "1x", "m") крашил бота
+    # необработанным исключением. Теперь любой некорректный формат просто
+    # даёт пользователю понятное сообщение об ошибке.
+    if unit_char not in units or not number_part.isdigit():
+        await update.message.reply_text("❌ Неверный формат. Примеры: 10m, 1h, 2d")
         return
+
+    amount = int(number_part)
+    if amount <= 0:
+        await update.message.reply_text("❌ Число должно быть больше нуля.")
+        return
+
+    kwarg_name, label_word = units[unit_char]
+    delta = timedelta(**{kwarg_name: amount})
+    label = f"{amount} {label_word}"
+
     target = update.message.reply_to_message.from_user
     mute_until = datetime.now(timezone.utc) + delta
-    await context.bot.restrict_chat_member(
-        chat_id=update.message.chat_id, user_id=target.id,
-        permissions=ChatPermissions(can_send_messages=False),
-        until_date=mute_until,
-    )
     mention = f'<a href="tg://user?id={target.id}">{target.first_name}</a>'
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=update.message.chat_id, user_id=target.id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=mute_until,
+        )
+    except TelegramError as e:
+        await update.message.reply_text(f"⚠️ Не удалось замутить {target.first_name}: {e}")
+        return
+
     log("МУТ НА ВРЕМЯ", f"admin={update.message.from_user.first_name} | target={target.first_name} | время={label}")
     await send_owner_log(
         context.bot,
@@ -592,7 +682,7 @@ async def cmd_chatinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.message.chat
     try:
         count = await context.bot.get_chat_member_count(chat.id)
-    except Exception:
+    except TelegramError:
         count = "?"
     chat_type = {"group": "Группа", "supergroup": "Супергруппа", "channel": "Канал"}.get(chat.type, chat.type)
     username = f"@{chat.username}" if chat.username else "нет"
@@ -647,8 +737,17 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last = "".join(lines[-30:])
     await update.message.reply_text(f"📋 <b>Последние события:</b>\n\n<pre>{last}</pre>", parse_mode="HTML")
 
+# ── Глобальный обработчик ошибок ─────────────────────────────────────────────
+# Раньше исключения в хендлерах (например, кривой /mute_time) просто убивали
+# обработку конкретного апдейта без всякого лога и бот "молчал". Теперь любая
+# необработанная ошибка логируется и не роняет весь процесс.
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[НЕОБРАБОТАННАЯ ОШИБКА] {context.error}")
+    log("ОШИБКА", str(context.error))
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+    app.add_error_handler(error_handler)
 
     # Модерация
     app.add_handler(CommandHandler("bot", toggle_bot))
@@ -680,7 +779,11 @@ def main():
 
     # Сообщения
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Теперь ловим и текст, и подписи к медиа (фото/видео/документы) — раньше
+    # оскорбления в подписи проходили мимо фильтра.
+    app.add_handler(MessageHandler(
+        (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message
+    ))
 
     log("ЗАПУСК", "Бот запущен")
     print("Бот запущен.")
